@@ -182,11 +182,12 @@ html, body { overflow-x: clip; overscroll-behavior-x: none; max-width: 100%; }
   display: grid; place-items: center; overflow: hidden; flex: none;
   border-radius: 50%; background: var(--accent-soft); color: var(--accent);
   font-weight: 800; background-size: cover; background-position: center;
+  background-repeat: no-repeat; background-origin: border-box; background-clip: border-box;
 }
-.avatar-tab { width: 24px; height: 24px; font-size: 12px; border: 2px solid transparent; }
-.tabbar button.active .avatar-tab { border-color: var(--accent); }
+.avatar-tab { width: 26px; height: 26px; font-size: 12px; }
+.tabbar button.active .avatar-tab { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
 .profile-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; padding: 8px 0 4px; }
-.avatar-big { width: 96px; height: 96px; font-size: 38px; position: relative; border: 3px solid var(--surface); box-shadow: var(--shadow); }
+.avatar-big { width: 96px; height: 96px; font-size: 38px; position: relative; box-shadow: 0 0 0 3px var(--surface), var(--shadow); }
 .avatar-edit { display: flex; gap: 8px; justify-content: center; margin-top: 6px; }
 .profile-email { font-weight: 700; font-size: 16px; word-break: break-all; }
 .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; background: var(--surface-2); padding: 4px; border-radius: 12px; }
