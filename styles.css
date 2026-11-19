@@ -166,6 +166,15 @@ main { max-width: 640px; margin: 0 auto; padding: 4px 16px calc(var(--tabbar-h) 
 .color-row button { width: 34px; height: 34px; border-radius: 10px; border: 3px solid transparent; }
 .color-row button.on { border-color: var(--text); }
 
+/* ---------- Troca de mês (deslizar) ---------- */
+main { touch-action: pan-y; }
+.slide-next { animation: slideNext .22s ease-out; }
+.slide-prev { animation: slidePrev .22s ease-out; }
+@keyframes slideNext { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes slidePrev { from { transform: translateX(-40px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .slide-next, .slide-prev { animation: none; } }
+body { overflow-x: hidden; }
+
 /* ---------- Perfil ---------- */
 .avatar {
   display: grid; place-items: center; overflow: hidden; flex: none;

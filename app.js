@@ -159,8 +159,40 @@
       window.scrollTo(0, 0);
     };
   });
-  $('#prev-month').onclick = () => { state.month--; render(); };
-  $('#next-month').onclick = () => { state.month++; render(); };
+  function changeMonth(delta) {
+    state.month += delta;
+    render();
+    const v = $('#view');
+    v.classList.remove('slide-next', 'slide-prev');
+    void v.offsetWidth; // reinicia a animação
+    v.classList.add(delta > 0 ? 'slide-next' : 'slide-prev');
+  }
+  $('#prev-month').onclick = () => changeMonth(-1);
+  $('#next-month').onclick = () => changeMonth(1);
+
+  // Deslizar o dedo para trocar de mês (esquerda = próximo, direita = anterior)
+  (() => {
+    let x0 = null, y0 = 0, t0 = 0;
+    const EDGE = 28; // ignora a borda da tela (gesto "voltar" do Android)
+    document.addEventListener('touchstart', (e) => {
+      x0 = null;
+      if (e.touches.length !== 1 || !$('#sheet').hidden || $('#app').hidden) return;
+      if (['cartoes', 'perfil'].includes(state.tab)) return;
+      const t = e.touches[0];
+      if (t.clientX < EDGE || t.clientX > innerWidth - EDGE) return;
+      if (t.target.closest('input, select, textarea, .tabbar')) return;
+      x0 = t.clientX; y0 = t.clientY; t0 = Date.now();
+    }, { passive: true });
+    document.addEventListener('touchend', (e) => {
+      if (x0 === null) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - x0, dy = t.clientY - y0;
+      x0 = null;
+      if (Date.now() - t0 > 700) return;                               // arrasto lento demais
+      if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return; // curto ou mais vertical (rolagem)
+      changeMonth(dx < 0 ? 1 : -1);
+    }, { passive: true });
+  })();
   $('#fab').onclick = () => (state.tab === 'cartoes' ? openCardForm() : openExpenseForm());
 
   // ---------- Render ----------
@@ -718,6 +750,19 @@
   // ---------- Início ----------
   applyTheme(getTheme());
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme(getTheme()));
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // Quando uma versão nova do app é instalada, recarrega uma vez para já mostrar a atualização
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (hadController && !reloaded) { reloaded = true; location.reload(); }
+    });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
+      .then((reg) => {
+        // Confere atualizações ao voltar para o app (ex.: depois de minimizado)
+        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+      })
+      .catch(() => {});
+  }
   sb.auth.getSession().then(({ data }) => { if (!data.session) showAuth(); });
 })();
