@@ -8,6 +8,10 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
+  <script>
+    // Aplica o tema salvo antes de desenhar a página (evita "piscar")
+    try { var t = localStorage.getItem('theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
 </head>
 <body>
   <!-- Tela de login -->
@@ -43,6 +47,7 @@
       <button data-tab="gastos"><span class="ti">☰</span>Gastos</button>
       <button data-tab="faturas"><span class="ti">▤</span>Faturas</button>
       <button data-tab="cartoes"><span class="ti">▭</span>Cartões</button>
+      <button data-tab="perfil"><span class="avatar avatar-tab" id="tab-avatar"></span>Perfil</button>
     </nav>
   </div>
 

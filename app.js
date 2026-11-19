@@ -99,7 +99,7 @@
   let signUpMode = false;
 
   function showAuth() { $('#auth').hidden = false; $('#app').hidden = true; }
-  function showApp() { $('#auth').hidden = true; $('#app').hidden = false; loadData(); }
+  function showApp() { $('#auth').hidden = true; $('#app').hidden = false; loadData(); loadAvatar(); }
 
   $('#auth-toggle').onclick = () => {
     signUpMode = !signUpMode;
@@ -147,7 +147,7 @@
     const had = !!state.session;
     state.session = session;
     if (session && !had) showApp();
-    if (!session) { state.cards = []; state.expenses = []; showAuth(); }
+    if (!session) { state.cards = []; state.expenses = []; state.avatarUrl = null; showAuth(); }
   });
 
   // ---------- Navegação ----------
@@ -165,10 +165,15 @@
 
   // ---------- Render ----------
   function render() {
-    $('#month-title').textContent = monthName(state.month);
+    const monthly = !['cartoes', 'perfil'].includes(state.tab);
+    $('#month-title').textContent = monthly ? monthName(state.month) : (state.tab === 'perfil' ? 'Perfil' : 'Cartões');
+    $('#prev-month').style.visibility = monthly ? 'visible' : 'hidden';
+    $('#next-month').style.visibility = monthly ? 'visible' : 'hidden';
+    $('#fab').hidden = state.tab === 'perfil';
     $('#fab').setAttribute('aria-label', state.tab === 'cartoes' ? 'Novo cartão' : 'Novo gasto');
-    const views = { resumo: renderResumo, gastos: renderGastos, faturas: renderFaturas, cartoes: renderCartoes };
+    const views = { resumo: renderResumo, gastos: renderGastos, faturas: renderFaturas, cartoes: renderCartoes, perfil: renderPerfil };
     $('#view').innerHTML = views[state.tab]();
+    paintAvatars();
     bindView();
   }
 
@@ -280,13 +285,160 @@
           </li>`).join('')}
       </ul></section>
       <p class="muted" style="text-align:center;font-size:13px">
-        Compras feitas depois do dia de fechamento entram na fatura seguinte.</p>
-      <div style="text-align:center"><button class="btn link" id="logout">Sair da conta</button></div>`;
+        Compras feitas depois do dia de fechamento entram na fatura seguinte.</p>`;
   }
 
   function emptyState(title, sub) {
-    const extra = state.tab === 'cartoes' ? '<div style="text-align:center"><button class="btn link" id="logout">Sair da conta</button></div>' : '';
-    return `<div class="empty"><b>${esc(title)}</b>${esc(sub)}</div>${extra}`;
+    return `<div class="empty"><b>${esc(title)}</b>${esc(sub)}</div>`;
+  }
+
+  // ---------- Perfil ----------
+  function renderPerfil() {
+    const email = state.session?.user?.email || '';
+    const theme = getTheme();
+    return `
+      <section class="card">
+        <div class="profile-head">
+          <span class="avatar avatar-big" id="big-avatar"></span>
+          <div class="avatar-edit">
+            <button class="btn small" id="avatar-pick">📷 ${state.avatarUrl ? 'Trocar foto' : 'Adicionar foto'}</button>
+            ${state.avatarUrl ? '<button class="btn small" id="avatar-remove">Remover</button>' : ''}
+          </div>
+          <input type="file" id="avatar-file" accept="image/*" hidden>
+          <div class="muted" style="font-size:13px;margin-top:8px">Conectado como</div>
+          <div class="profile-email">${esc(email)}</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Tema do app</h2>
+        <div class="seg" id="theme-seg">
+          ${[['system', 'Automático'], ['light', '☀️ Claro'], ['dark', '🌙 Escuro']].map(([v, l]) =>
+            `<button type="button" data-theme-opt="${v}" class="${v === theme ? 'on' : ''}">${l}</button>`).join('')}
+        </div>
+        <p class="muted" style="font-size:12.5px;margin:8px 2px 0">Automático segue o tema do seu celular.</p>
+      </section>
+
+      <section class="card">
+        <h2>Alterar senha</h2>
+        <form id="pwd-form" novalidate>
+          <label>Nova senha<input type="password" name="p1" minlength="6" autocomplete="new-password" required></label>
+          <label>Repita a nova senha<input type="password" name="p2" minlength="6" autocomplete="new-password" required></label>
+          <p class="msg" id="pwd-msg" style="text-align:left"></p>
+          <button class="btn primary" type="submit">Salvar nova senha</button>
+        </form>
+      </section>
+
+      <button class="btn danger" id="logout" style="width:100%">Sair da conta</button>`;
+  }
+
+  // Tema: 'system' | 'light' | 'dark' (preferência deste aparelho)
+  function getTheme() {
+    try { return localStorage.getItem('theme') || 'system'; } catch { return 'system'; }
+  }
+  function applyTheme(t) {
+    try { t === 'system' ? localStorage.removeItem('theme') : localStorage.setItem('theme', t); } catch {}
+    if (t === 'system') delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = t;
+    const dark = t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.querySelector('meta[name="theme-color"]').content = dark ? '#0f1115' : '#f4f5f7';
+  }
+
+  // Foto de perfil (guardada no Supabase Storage, pasta privada do usuário)
+  const avatarPath = () => `${state.session.user.id}/avatar.jpg`;
+
+  async function loadAvatar() {
+    const { data, error } = await sb.storage.from('avatars').createSignedUrl(avatarPath(), 60 * 60 * 24 * 7);
+    state.avatarUrl = error ? null : data.signedUrl;
+    paintAvatars();
+    if (state.tab === 'perfil') render();
+  }
+
+  function paintAvatars() {
+    const initial = (state.session?.user?.email || '?')[0].toUpperCase();
+    document.querySelectorAll('#tab-avatar, #big-avatar').forEach((el) => {
+      if (state.avatarUrl) { el.style.backgroundImage = `url("${state.avatarUrl}")`; el.textContent = ''; }
+      else { el.style.backgroundImage = ''; el.textContent = initial; }
+    });
+  }
+
+  // Reduz a foto para 256x256 (recorte quadrado central) antes de enviar
+  function resizeImage(file, size = 256) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const s = Math.min(img.width, img.height);
+        const c = document.createElement('canvas');
+        c.width = c.height = size;
+        c.getContext('2d').drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, size, size);
+        URL.revokeObjectURL(img.src);
+        c.toBlob((b) => (b ? resolve(b) : reject(new Error('Não foi possível processar a imagem'))), 'image/jpeg', 0.85);
+      };
+      img.onerror = () => reject(new Error('Arquivo de imagem inválido'));
+      img.src = URL.createObjectURL(file);
+    });
+  }
+
+  async function uploadAvatar(file) {
+    const btn = $('#avatar-pick');
+    btn.disabled = true;
+    btn.textContent = 'Enviando…';
+    try {
+      const blob = await resizeImage(file);
+      const { error } = await sb.storage.from('avatars').upload(avatarPath(), blob, { upsert: true, contentType: 'image/jpeg', cacheControl: '60' });
+      if (error) throw error;
+      await loadAvatar();
+      toast('Foto atualizada');
+    } catch (err) {
+      toast('Erro ao enviar foto: ' + err.message);
+      render();
+    }
+  }
+
+  async function removeAvatar() {
+    if (!confirm('Remover sua foto de perfil?')) return;
+    const { error } = await sb.storage.from('avatars').remove([avatarPath()]);
+    if (error) { toast('Erro ao remover: ' + error.message); return; }
+    state.avatarUrl = null;
+    render();
+    toast('Foto removida');
+  }
+
+  function bindPerfil() {
+    const pick = $('#avatar-pick');
+    if (!pick) return;
+    const file = $('#avatar-file');
+    pick.onclick = () => file.click();
+    file.onchange = () => { if (file.files[0]) uploadAvatar(file.files[0]); };
+    const rm = $('#avatar-remove'); if (rm) rm.onclick = removeAvatar;
+
+    document.querySelectorAll('[data-theme-opt]').forEach((b) => {
+      b.onclick = () => {
+        applyTheme(b.dataset.themeOpt);
+        document.querySelectorAll('[data-theme-opt]').forEach((x) => x.classList.toggle('on', x === b));
+      };
+    });
+
+    $('#pwd-form').onsubmit = async (ev) => {
+      ev.preventDefault();
+      const f = ev.target;
+      const msg = $('#pwd-msg');
+      msg.className = 'msg error';
+      if (f.p1.value.length < 6) { msg.textContent = 'A senha precisa ter pelo menos 6 caracteres.'; return; }
+      if (f.p1.value !== f.p2.value) { msg.textContent = 'As senhas não são iguais.'; return; }
+      const btn = f.querySelector('[type=submit]');
+      btn.disabled = true;
+      const { error } = await sb.auth.updateUser({ password: f.p1.value });
+      btn.disabled = false;
+      if (error) {
+        msg.textContent = /different from the old/i.test(error.message) ? 'A nova senha precisa ser diferente da atual.' : 'Erro: ' + error.message;
+        return;
+      }
+      f.reset();
+      msg.className = 'msg';
+      msg.textContent = '';
+      toast('Senha alterada com sucesso');
+    };
   }
 
   function bindView() {
@@ -297,7 +449,8 @@
       el.onclick = () => openCardForm(state.cards.find((x) => x.id === el.dataset.card));
     });
     const ex = $('#export'); if (ex) ex.onclick = exportExcel;
-    const lo = $('#logout'); if (lo) lo.onclick = () => sb.auth.signOut();
+    const lo = $('#logout'); if (lo) lo.onclick = () => { if (confirm('Sair da conta?')) sb.auth.signOut(); };
+    bindPerfil();
   }
 
   // ---------- Folha inferior ----------
@@ -563,6 +716,8 @@
   }
 
   // ---------- Início ----------
+  applyTheme(getTheme());
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme(getTheme()));
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   sb.auth.getSession().then(({ data }) => { if (!data.session) showAuth(); });
 })();

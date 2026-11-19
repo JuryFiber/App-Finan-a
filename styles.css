@@ -86,7 +86,7 @@ input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
 main { max-width: 640px; margin: 0 auto; padding: 4px 16px calc(var(--tabbar-h) + 96px); }
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 6;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
   padding-bottom: env(safe-area-inset-bottom);
   background: var(--surface); border-top: 1px solid var(--border);
@@ -165,6 +165,24 @@ main { max-width: 640px; margin: 0 auto; padding: 4px 16px calc(var(--tabbar-h) 
 .color-row { display: flex; gap: 10px; flex-wrap: wrap; }
 .color-row button { width: 34px; height: 34px; border-radius: 10px; border: 3px solid transparent; }
 .color-row button.on { border-color: var(--text); }
+
+/* ---------- Perfil ---------- */
+.avatar {
+  display: grid; place-items: center; overflow: hidden; flex: none;
+  border-radius: 50%; background: var(--accent-soft); color: var(--accent);
+  font-weight: 800; background-size: cover; background-position: center;
+}
+.avatar-tab { width: 24px; height: 24px; font-size: 12px; border: 2px solid transparent; }
+.tabbar button.active .avatar-tab { border-color: var(--accent); }
+.profile-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; padding: 8px 0 4px; }
+.avatar-big { width: 96px; height: 96px; font-size: 38px; position: relative; border: 3px solid var(--surface); box-shadow: var(--shadow); }
+.avatar-edit { display: flex; gap: 8px; justify-content: center; margin-top: 6px; }
+.profile-email { font-weight: 700; font-size: 16px; word-break: break-all; }
+.seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; background: var(--surface-2); padding: 4px; border-radius: 12px; }
+.seg button { border: 0; background: none; padding: 9px 6px; border-radius: 9px; font-weight: 600; font-size: 14px; color: var(--muted); }
+.seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.card form { display: grid; gap: 12px; }
+.card .msg:empty { display: none; }
 
 .toast {
   position: fixed; left: 50%; transform: translateX(-50%); z-index: 30;
