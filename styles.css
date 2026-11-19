@@ -168,6 +168,8 @@ main { max-width: 640px; margin: 0 auto; padding: 4px 16px calc(var(--tabbar-h) 
 
 /* ---------- Troca de mês (deslizar) ---------- */
 main { touch-action: pan-y; }
+/* Desliga o efeito de "esticar/zoom" do Android ao deslizar para os lados */
+html, body { overscroll-behavior-x: none; }
 .slide-next { animation: slideNext .22s ease-out; }
 .slide-prev { animation: slidePrev .22s ease-out; }
 @keyframes slideNext { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
