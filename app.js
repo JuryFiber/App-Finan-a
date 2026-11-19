@@ -65,23 +65,39 @@
     return `${pad2(Math.min(card.due_day, daysIn(idx)))}/${pad2((idx % 12) + 1)}`;
   }
 
-  // Quebra uma compra em lançamentos mensais (parcelas)
-  function entriesOf(exp) {
-    const card = state.cards.find((c) => c.id === exp.card_id) || null;
-    const n = card ? exp.installments : 1;
-    const amount = Number(exp.amount);
-    const per = round2(amount / n);
-    const start = card ? invoiceMonth(exp.purchase_date, card) : (() => { const { y, m } = parseDate(exp.purchase_date); return y * 12 + m; })();
-    const out = [];
-    for (let i = 0; i < n; i++) {
-      const total = i === n - 1 ? round2(amount - per * (n - 1)) : per; // última parcela absorve os centavos
-      const mine = round2(total / exp.split_divisor);
-      out.push({ exp, card, month: start + i, inst: i + 1, n, total, mine, hers: round2(total - mine) });
-    }
-    return out;
+  // Mês (índice absoluto) do 1º lançamento de um gasto
+  function startMonth(exp, card) {
+    if (card) return invoiceMonth(exp.purchase_date, card);
+    const { y, m } = parseDate(exp.purchase_date);
+    return y * 12 + m;
   }
 
-  const entriesForMonth = (idx) => state.expenses.flatMap(entriesOf).filter((e) => e.month === idx);
+  // Lançamento de um gasto em determinado mês (ou null se não cai nesse mês)
+  //  - Única: 1 lançamento | Parcelada: valor total dividido em n | Mensal fixa: valor cheio todo mês (com ou sem fim)
+  function entryFor(exp, idx) {
+    const card = state.cards.find((c) => c.id === exp.card_id) || null;
+    const k = idx - startMonth(exp, card);
+    if (k < 0) return null;
+    const amount = Number(exp.amount);
+    let total, n;
+    if (exp.recurring) {
+      n = exp.recur_count || null;              // null = sem fim
+      if (n && k >= n) return null;
+      total = amount;
+    } else {
+      n = exp.installments || 1;
+      if (k >= n) return null;
+      const per = round2(amount / n);
+      total = k === n - 1 ? round2(amount - per * (n - 1)) : per; // última parcela absorve os centavos
+    }
+    const mine = round2(total / exp.split_divisor);
+    return { exp, card, month: idx, inst: k + 1, n, total, mine, hers: round2(total - mine) };
+  }
+
+  const entriesForMonth = (idx) => state.expenses.map((e) => entryFor(e, idx)).filter(Boolean);
+
+  // Texto da parcela: "3/10", "3/60" (financiamento) ou "mensal" (sem fim)
+  const instLabel = (e) => (e.exp.recurring && !e.n ? 'mensal' : e.n > 1 ? `${e.inst}/${e.n}` : '');
 
   // ---------- Dados ----------
   async function loadData() {
@@ -147,17 +163,40 @@
     const had = !!state.session;
     state.session = session;
     if (session && !had) showApp();
-    if (!session) { state.cards = []; state.expenses = []; state.avatarUrl = null; showAuth(); }
+    if (!session) {
+      state.cards = []; state.expenses = []; state.avatarUrl = null;
+      if (state.tab !== 'resumo') setTab('resumo'); // próxima entrada começa no Resumo
+      showAuth();
+    }
   });
 
   // ---------- Navegação ----------
+  // ---------- Botão "voltar" do celular ----------
+  // Histórico: [base] → [outra aba] → [formulário aberto]. Voltar fecha o formulário, depois volta ao Resumo,
+  // e só então sai do app.
+  const nav = { tabPushed: false, sheetPushed: false, ignorePop: 0 };
+  history.replaceState({ base: true }, '');
+  function historyBack() { nav.ignorePop++; history.back(); }
+
+  function setTab(tab, fromPop = false) {
+    if (!fromPop) {
+      if (tab !== 'resumo' && !nav.tabPushed) { history.pushState({ tab: true }, ''); nav.tabPushed = true; }
+      else if (tab === 'resumo' && nav.tabPushed) { nav.tabPushed = false; historyBack(); }
+    }
+    state.tab = tab;
+    document.querySelectorAll('.tabbar button').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  window.addEventListener('popstate', () => {
+    if (nav.ignorePop > 0) { nav.ignorePop--; return; }
+    if (nav.sheetPushed) { nav.sheetPushed = false; closeSheet(true); return; }
+    if (nav.tabPushed) { nav.tabPushed = false; setTab('resumo', true); }
+  });
+
   document.querySelectorAll('.tabbar button').forEach((b) => {
-    b.onclick = () => {
-      state.tab = b.dataset.tab;
-      document.querySelectorAll('.tabbar button').forEach((x) => x.classList.toggle('active', x === b));
-      render();
-      window.scrollTo(0, 0);
-    };
+    b.onclick = () => { if (b.dataset.tab !== state.tab) setTab(b.dataset.tab); };
   });
   function changeMonth(delta) {
     state.month += delta;
@@ -222,7 +261,7 @@
     const maxCat = cats[0][1] || 1;
 
     const byPay = {};
-    list.forEach((e) => { const k = e.card ? e.card.name : 'À vista (Pix/dinheiro/débito)'; byPay[k] = (byPay[k] || 0) + e.mine; });
+    list.forEach((e) => { const k = e.card ? e.card.name : 'Pix / boleto / dinheiro'; byPay[k] = (byPay[k] || 0) + e.mine; });
 
     return `
       <section class="card hero">
@@ -249,15 +288,16 @@
   }
 
   function entryRow(e) {
-    const where = e.card ? esc(e.card.name) : 'À vista';
-    const inst = e.n > 1 ? ` · ${e.inst}/${e.n}` : '';
+    const where = e.card ? esc(e.card.name) : 'Pix/boleto';
+    const lbl = instLabel(e);
+    const inst = lbl ? ` · ${e.exp.recurring ? '🔁 ' : ''}${lbl}` : '';
     const split = e.exp.split_divisor > 1 ? ` <span class="tag">/${e.exp.split_divisor}</span>` : '';
     return `
       <li class="item tap" data-exp="${e.exp.id}">
         <div class="dot">${CAT_ICON[e.exp.category] || '📦'}</div>
         <div class="grow">
           <div class="title">${esc(e.exp.description)}${split}</div>
-          <div class="sub">${where}${inst} · ${fmtDate(e.exp.purchase_date)}</div>
+          <div class="sub">${where}${inst} · ${e.exp.recurring ? 'dia ' + parseDate(e.exp.purchase_date).d : fmtDate(e.exp.purchase_date)}</div>
         </div>
         <div class="val num">${brl(e.mine)}${e.exp.split_divisor > 1 ? `<small>de ${brl(e.total)}</small>` : ''}</div>
       </li>`;
@@ -266,10 +306,12 @@
   function renderGastos() {
     const list = entriesForMonth(state.month).sort((a, b) => b.exp.purchase_date.localeCompare(a.exp.purchase_date));
     if (!list.length) return emptyState('Nenhum gasto neste mês', 'Compras no cartão aparecem no mês da fatura.');
-    const vista = list.filter((e) => !e.card);
+    const fixas = list.filter((e) => !e.card && e.exp.recurring);
+    const vista = list.filter((e) => !e.card && !e.exp.recurring);
     const cartao = list.filter((e) => e.card);
     let html = '';
-    if (vista.length) html += `<div class="day-head">À vista</div><section class="card"><ul class="list">${vista.map(entryRow).join('')}</ul></section>`;
+    if (fixas.length) html += `<div class="day-head">Contas fixas do mês</div><section class="card"><ul class="list">${fixas.map(entryRow).join('')}</ul></section>`;
+    if (vista.length) html += `<div class="day-head">Pix / boleto / dinheiro</div><section class="card"><ul class="list">${vista.map(entryRow).join('')}</ul></section>`;
     if (cartao.length) html += `<div class="day-head">No cartão (fatura deste mês)</div><section class="card"><ul class="list">${cartao.map(entryRow).join('')}</ul></section>`;
     return html;
   }
@@ -492,14 +534,16 @@
     sh.hidden = false;
     $('#sheet-backdrop').hidden = false;
     document.body.style.overflow = 'hidden';
+    if (!nav.sheetPushed) { history.pushState({ sheet: true }, ''); nav.sheetPushed = true; }
   }
-  function closeSheet() {
+  function closeSheet(fromPop = false) {
+    if (!fromPop && nav.sheetPushed) { nav.sheetPushed = false; historyBack(); }
     $('#sheet').hidden = true;
     $('#sheet-backdrop').hidden = true;
     document.body.style.overflow = '';
   }
-  $('#sheet-backdrop').onclick = closeSheet;
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
+  $('#sheet-backdrop').onclick = () => closeSheet();
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#sheet').hidden) closeSheet(); });
 
   function chipGroup(name, options, current) {
     return `<div class="chips" data-group="${name}">${options.map(([v, label]) =>
@@ -518,47 +562,70 @@
   const chipVal = (root, name) => root.querySelector(`[data-group="${name}"] .chip.on`)?.dataset.v;
 
   // ---------- Formulário de gasto ----------
+  // Tipos: 'single' (única) | 'installment' (parcelada, valor total dividido) | 'recurring' (mensal fixa: valor cheio todo mês)
   function openExpenseForm(exp) {
-    const e = exp || { description: '', amount: '', category: 'Mercado', purchase_date: todayStr(), card_id: '', installments: 1, split_divisor: 1 };
-    const payOpts = [['', '💵 À vista'], ...state.cards.map((c) => [c.id, `▭ ${esc(c.name)}`])];
+    const e = exp || { description: '', amount: '', category: 'Mercado', purchase_date: todayStr(), card_id: '', installments: 1, split_divisor: 1, recurring: false, recur_count: null };
+    const kind = e.recurring ? 'recurring' : e.installments > 1 ? 'installment' : 'single';
+    const payOpts = [['', '💵 Pix / boleto'], ...state.cards.map((c) => [c.id, `▭ ${esc(c.name)}`])];
+    const card0 = state.cards.find((c) => c.id === e.card_id) || null;
+    const canEnd = exp && exp.recurring && state.month >= startMonth(exp, card0);
     openSheet(`
       <h3>${exp ? 'Editar gasto' : 'Novo gasto'}</h3>
       <form id="exp-form" novalidate>
-        <label>Valor total da compra
+        <div><label style="margin-bottom:6px">Tipo</label>${chipGroup('kind', [['single', 'Única'], ['installment', 'Parcelada'], ['recurring', '🔁 Mensal fixa']], kind)}</div>
+        <label><span id="amount-label">Valor total da compra</span>
           <input class="amount-input num" name="amount" inputmode="decimal" placeholder="0,00" required
             value="${exp ? String(Number(e.amount).toFixed(2)).replace('.', ',') : ''}"></label>
-        <label>Descrição<input name="description" maxlength="80" required placeholder="Ex.: Mercado, Uber, Netflix" value="${esc(e.description)}"></label>
+        <label>Descrição<input name="description" maxlength="80" required placeholder="Ex.: Mercado, Internet, Financiamento" value="${esc(e.description)}"></label>
         <div><label style="margin-bottom:6px">Categoria</label>${chipGroup('category', CATEGORIES.map(([c, i]) => [c, `${i} ${c}`]), e.category)}</div>
         <div><label style="margin-bottom:6px">Pagamento</label>${chipGroup('card', payOpts, e.card_id || '')}</div>
         <div class="grid2">
-          <label>Data da compra<input type="date" name="purchase_date" required value="${e.purchase_date}"></label>
+          <label><span id="date-label">Data da compra</span><input type="date" name="purchase_date" required value="${e.purchase_date}"></label>
           <label id="inst-wrap">Parcelas
-            <select name="installments">${Array.from({ length: 24 }, (_, i) => i + 1).map((n) =>
-              `<option value="${n}"${n === e.installments ? ' selected' : ''}>${n === 1 ? 'À vista (1x)' : n + 'x'}</option>`).join('')}</select></label>
+            <select name="installments">${Array.from({ length: 47 }, (_, i) => i + 2).map((n) =>
+              `<option value="${n}"${n === e.installments ? ' selected' : ''}>${n}x</option>`).join('')}</select></label>
+          <label id="recur-wrap">Por quantos meses?
+            <input name="recur_count" type="number" min="1" max="600" inputmode="numeric" placeholder="Sem fim" value="${e.recur_count || ''}"></label>
         </div>
         <div><label style="margin-bottom:6px">Divisão com a namorada</label>${chipGroup('split', Object.entries(SPLIT_LABEL), e.split_divisor)}</div>
         <div class="preview" id="exp-preview"></div>
         <p class="msg error" id="exp-msg"></p>
         <div class="sheet-actions">
           <button class="btn primary" type="submit">${exp ? 'Salvar alterações' : 'Adicionar gasto'}</button>
+          ${canEnd ? `<button class="btn" type="button" id="exp-end">⏹ Encerrar após ${monthName(state.month)}</button>` : ''}
           ${exp ? '<button class="btn danger" type="button" id="exp-del">Excluir gasto</button>' : ''}
         </div>
       </form>`);
 
     const form = $('#exp-form');
     const update = () => {
-      const cardId = chipVal(form, 'card');
-      const card = state.cards.find((c) => c.id === cardId);
-      $('#inst-wrap').style.visibility = card ? 'visible' : 'hidden';
+      const k = chipVal(form, 'kind');
+      const card = state.cards.find((c) => c.id === chipVal(form, 'card'));
+      $('#inst-wrap').hidden = k !== 'installment';
+      $('#recur-wrap').hidden = k !== 'recurring';
+      $('#amount-label').textContent = k === 'recurring' ? 'Valor por mês' : 'Valor total da compra';
+      $('#date-label').textContent = k === 'recurring' ? 'Primeiro mês (data)' : 'Data da compra';
       const amount = parseMoney(form.amount.value);
-      const n = card ? Number(form.installments.value) : 1;
       const div = Number(chipVal(form, 'split'));
       const pv = $('#exp-preview');
       if (!(amount > 0)) { pv.textContent = 'Digite o valor para ver o resumo.'; return; }
-      const per = amount / n;
-      let txt = n > 1 ? `${n}x de ${brl(per)}` : brl(amount);
-      if (div > 1) txt += ` · sua parte ${brl(per / div)}${n > 1 ? ' por mês' : ''}`;
-      if (card && form.purchase_date.value) txt += ` · ${n > 1 ? '1ª parcela na' : 'entra na'} fatura de ${monthName(invoiceMonth(form.purchase_date.value, card))}`;
+      const start = form.purchase_date.value ? (card ? invoiceMonth(form.purchase_date.value, card) : startMonth({ purchase_date: form.purchase_date.value }, null)) : null;
+      let txt;
+      if (k === 'recurring') {
+        const n = parseInt(form.recur_count.value, 10);
+        txt = `${brl(amount)} todo mês`;
+        if (div > 1) txt += ` · sua parte ${brl(amount / div)}`;
+        if (start !== null) txt += n > 0 ? ` · de ${monthName(start)} até ${monthName(start + n - 1)} (${n}x)` : ` · a partir de ${monthName(start)}, sem data para acabar`;
+      } else if (k === 'installment') {
+        const n = Number(form.installments.value);
+        txt = `${n}x de ${brl(amount / n)}`;
+        if (div > 1) txt += ` · sua parte ${brl(amount / n / div)} por mês`;
+        if (start !== null) txt += ` · de ${monthName(start)} até ${monthName(start + n - 1)}`;
+      } else {
+        txt = brl(amount);
+        if (div > 1) txt += ` · sua parte ${brl(amount / div)}`;
+        if (card && start !== null) txt += ` · entra na fatura de ${monthName(start)}`;
+      }
       pv.textContent = txt;
     };
     bindChips(form, update);
@@ -566,16 +633,32 @@
     update();
     if (!exp) setTimeout(() => form.amount.focus(), 50);
 
+    async function save(row) {
+      const msg = $('#exp-msg');
+      const res = exp
+        ? await sb.from('expenses').update(row).eq('id', exp.id).select().single()
+        : await sb.from('expenses').insert(row).select().single();
+      if (res.error) { msg.textContent = 'Erro ao salvar: ' + res.error.message; return false; }
+      if (exp) state.expenses = state.expenses.map((x) => (x.id === exp.id ? res.data : x));
+      else state.expenses.unshift(res.data);
+      closeSheet();
+      render();
+      return true;
+    }
+
     form.onsubmit = async (ev) => {
       ev.preventDefault();
-      const cardId = chipVal(form, 'card') || null;
+      const k = chipVal(form, 'kind');
+      const rc = parseInt(form.recur_count.value, 10);
       const row = {
         description: form.description.value.trim(),
         amount: parseMoney(form.amount.value),
         category: chipVal(form, 'category') || 'Outros',
         purchase_date: form.purchase_date.value,
-        card_id: cardId,
-        installments: cardId ? Number(form.installments.value) : 1,
+        card_id: chipVal(form, 'card') || null,
+        installments: k === 'installment' ? Number(form.installments.value) : 1,
+        recurring: k === 'recurring',
+        recur_count: k === 'recurring' && rc > 0 ? Math.min(rc, 600) : null,
         split_divisor: Number(chipVal(form, 'split')) || 1,
       };
       const msg = $('#exp-msg');
@@ -584,21 +667,22 @@
       if (!row.purchase_date) { msg.textContent = 'Informe a data.'; return; }
       const btn = form.querySelector('[type=submit]');
       btn.disabled = true;
-      const res = exp
-        ? await sb.from('expenses').update(row).eq('id', exp.id).select().single()
-        : await sb.from('expenses').insert(row).select().single();
+      const ok = await save(row);
       btn.disabled = false;
-      if (res.error) { msg.textContent = 'Erro ao salvar: ' + res.error.message; return; }
-      if (exp) state.expenses = state.expenses.map((x) => (x.id === exp.id ? res.data : x));
-      else state.expenses.unshift(res.data);
-      closeSheet();
-      render();
-      toast(exp ? 'Gasto atualizado' : 'Gasto adicionado');
+      if (ok) toast(exp ? 'Gasto atualizado' : 'Gasto adicionado');
+    };
+
+    const end = $('#exp-end');
+    if (end) end.onclick = async () => {
+      const count = state.month - startMonth(exp, card0) + 1;
+      if (!confirm(`Encerrar "${exp.description}"? Ele aparece até ${monthName(state.month)} e some dos meses seguintes.`)) return;
+      if (await save({ recur_count: count })) toast('Conta encerrada');
     };
 
     const del = $('#exp-del');
     if (del) del.onclick = async () => {
-      if (!confirm(`Excluir "${exp.description}"${exp.installments > 1 ? ' e todas as parcelas' : ''}?`)) return;
+      const extra = exp.recurring ? ' de todos os meses (inclusive os anteriores)' : exp.installments > 1 ? ' e todas as parcelas' : '';
+      if (!confirm(`Excluir "${exp.description}"${extra}?${exp.recurring ? '\n\nSe você só cancelou a conta, use "Encerrar" para manter o histórico.' : ''}`)) return;
       const { error } = await sb.from('expenses').delete().eq('id', exp.id);
       if (error) { $('#exp-msg').textContent = 'Erro ao excluir: ' + error.message; return; }
       state.expenses = state.expenses.filter((x) => x.id !== exp.id);
@@ -656,12 +740,12 @@
     const del = $('#card-del');
     if (del) del.onclick = async () => {
       const used = state.expenses.filter((x) => x.card_id === card.id).length;
-      const warn = used ? `\n\n${used} gasto(s) desse cartão passarão a contar como "À vista".` : '';
+      const warn = used ? `\n\n${used} gasto(s) desse cartão passarão a contar como "Pix / boleto".` : '';
       if (!confirm(`Excluir o cartão "${card.name}"?${warn}`)) return;
       const { error } = await sb.from('cards').delete().eq('id', card.id);
       if (error) { $('#card-msg').textContent = 'Erro ao excluir: ' + error.message; return; }
       state.cards = state.cards.filter((x) => x.id !== card.id);
-      state.expenses = state.expenses.map((x) => (x.card_id === card.id ? { ...x, card_id: null, installments: 1 } : x));
+      state.expenses = state.expenses.map((x) => (x.card_id === card.id ? { ...x, card_id: null } : x));
       closeSheet();
       render();
       toast('Cartão excluído');
@@ -700,7 +784,7 @@
         const first = head.number + 1;
         inv.items.forEach((e) => {
           const name = e.exp.description.toUpperCase() + (e.exp.split_divisor > 1 ? ` /${e.exp.split_divisor}` : '');
-          const parc = e.n > 1 ? `(${pad2(e.inst)}/${pad2(e.n)})` : '';
+          const parc = e.exp.recurring && !e.n ? '(FIXO)' : e.n > 1 ? `(${pad2(e.inst)}/${pad2(e.n)})` : '';
           const r = ws.addRow([name, parc, e.mine]);
           r.getCell(2).alignment = { horizontal: 'center' };
           r.getCell(3).numFmt = money;
@@ -725,7 +809,7 @@
       ];
       ws2.getRow(1).font = { bold: true };
       invs.forEach((inv) => inv.items.forEach((e) => {
-        const r = ws2.addRow([inv.card.name, fmtDate(e.exp.purchase_date), e.exp.description, e.n > 1 ? `${e.inst}/${e.n}` : '1/1', e.total, e.mine, e.hers]);
+        const r = ws2.addRow([inv.card.name, fmtDate(e.exp.purchase_date), e.exp.description, instLabel(e) || '1/1', e.total, e.mine, e.hers]);
         [5, 6, 7].forEach((c) => (r.getCell(c).numFmt = money));
       }));
 
