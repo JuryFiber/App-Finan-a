@@ -20,6 +20,9 @@
     session: null,
     cards: [],
     expenses: [],
+    loadedAt: 0,       // quando os dados foram carregados pela última vez (0 = ainda não)
+    loadError: false,  // o primeiro carregamento falhou (mostra "Tentar de novo")
+    avatarUrl: null,
     tab: 'resumo',
     month: now.getFullYear() * 12 + now.getMonth(), // índice absoluto do mês
   };
@@ -38,7 +41,8 @@
 
   function parseMoney(s) {
     s = String(s).trim().replace(/[R$\s]/g, '');
-    if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+    if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');      // 1.234,56 → 1234.56
+    else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');    // 1.500 → 1500 (ponto de milhar)
     const v = parseFloat(s);
     return Number.isFinite(v) ? round2(v) : NaN;
   }
@@ -52,11 +56,13 @@
   }
 
   // ---------- Regras de fatura ----------
+  const cardById = (id) => state.cards.find((c) => c.id === id) || null;
+
   // Mês (índice absoluto) da fatura em que cai a 1ª parcela de uma compra no cartão.
   function invoiceMonth(dateStr, card) {
     const { y, m, d } = parseDate(dateStr);
     let close = y * 12 + m;
-    if (d > card.closing_day) close += 1;          // comprou depois do fechamento → próxima fatura
+    if (d >= card.closing_day) close += 1;         // comprou no dia do fechamento ou depois → próxima fatura
     return card.due_day <= card.closing_day ? close + 1 : close; // vencimento cai no mês seguinte ao fechamento
   }
 
@@ -72,26 +78,67 @@
     return y * 12 + m;
   }
 
+  // ---------- Contas fixas que mudam de valor ----------
+  // recur_changes = [{ from: 'AAAA-MM', amount?, card_id?, split_divisor? }], em ordem de mês: a partir de 'from',
+  // os campos presentes substituem os do lançamento; os meses anteriores continuam como eram.
+  const MONEY_FIELDS = ['amount', 'card_id', 'split_divisor'];
+  const monthKey = (idx) => `${Math.floor(idx / 12)}-${pad2((idx % 12) + 1)}`;
+  const moneyOf = (o) => ({ amount: Number(o.amount), card_id: o.card_id || null, split_divisor: Number(o.split_divisor) || 1 });
+  const sameMoney = (a, b) => MONEY_FIELDS.every((f) => a[f] === b[f]);
+
+  // Valor, cartão e divisão que valem no mês idx
+  function valuesAt(exp, idx) {
+    const key = monthKey(idx);
+    const v = moneyOf(exp);
+    for (const c of exp.recur_changes || []) if (c.from <= key) for (const f of MONEY_FIELDS) if (f in c) v[f] = c[f];
+    return moneyOf(v);
+  }
+
+  // Conta fixa editada no mês idx: o que mudou em valor, cartão ou divisão passa a valer a partir de idx
+  // (no 1º mês, desde o início). Mudanças já marcadas para meses seguintes continuam valendo.
+  function mergeForward(exp, row, idx) {
+    const before = valuesAt(exp, idx), want = moneyOf(row), base = moneyOf(exp);
+    let changes = (exp.recur_changes || []).map((c) => ({ ...c }));
+    let target = base;
+    if (idx > startMonth(exp, cardById(exp.card_id))) {
+      target = changes.find((c) => c.from === monthKey(idx));
+      if (!target) changes.push((target = { from: monthKey(idx) }));
+    }
+    for (const f of MONEY_FIELDS) if (want[f] !== before[f]) target[f] = want[f];
+    changes.sort((a, b) => a.from.localeCompare(b.from));
+    // Se a data mudou, as mudanças até o novo 1º mês passam a fazer parte do valor inicial
+    const start = monthKey(startMonth(row, cardById(base.card_id)));
+    for (const c of changes) if (c.from <= start) for (const f of MONEY_FIELDS) if (f in c) base[f] = c[f];
+    changes = changes.filter((c) => c.from > start);
+    // Guarda só o que realmente muda em relação ao que já valia antes
+    const prev = { ...base }, out = [];
+    for (const c of changes) {
+      const d = { from: c.from };
+      for (const f of MONEY_FIELDS) if (f in c && c[f] !== prev[f]) prev[f] = d[f] = c[f];
+      if (Object.keys(d).length > 1) out.push(d);
+    }
+    return { ...row, ...base, recur_changes: out };
+  }
+
   // Lançamento de um gasto em determinado mês (ou null se não cai nesse mês)
   //  - Única: 1 lançamento | Parcelada: valor total dividido em n | Mensal fixa: valor cheio todo mês (com ou sem fim)
   function entryFor(exp, idx) {
-    const card = state.cards.find((c) => c.id === exp.card_id) || null;
-    const k = idx - startMonth(exp, card);
+    const k = idx - startMonth(exp, cardById(exp.card_id));
     if (k < 0) return null;
-    const amount = Number(exp.amount);
+    const v = exp.recurring ? valuesAt(exp, idx) : moneyOf(exp);
     let total, n;
     if (exp.recurring) {
       n = exp.recur_count || null;              // null = sem fim
       if (n && k >= n) return null;
-      total = amount;
+      total = v.amount;
     } else {
       n = exp.installments || 1;
       if (k >= n) return null;
-      const per = round2(amount / n);
-      total = k === n - 1 ? round2(amount - per * (n - 1)) : per; // última parcela absorve os centavos
+      const per = round2(v.amount / n);
+      total = k === n - 1 ? round2(v.amount - per * (n - 1)) : per; // última parcela absorve os centavos
     }
-    const mine = round2(total / exp.split_divisor);
-    return { exp, card, month: idx, inst: k + 1, n, total, mine, hers: round2(total - mine) };
+    const mine = round2(total / v.split_divisor);
+    return { exp, card: cardById(v.card_id), div: v.split_divisor, inst: k + 1, n, total, mine, hers: round2(total - mine) };
   }
 
   const entriesForMonth = (idx) => state.expenses.map((e) => entryFor(e, idx)).filter(Boolean);
@@ -100,22 +147,50 @@
   const instLabel = (e) => (e.exp.recurring && !e.n ? 'mensal' : e.n > 1 ? `${e.inst}/${e.n}` : '');
 
   // ---------- Dados ----------
+  // O Supabase devolve no máximo 1000 linhas por consulta: busca os gastos em páginas até acabar
+  async function fetchAllExpenses() {
+    const PAGE = 1000;
+    const all = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await sb.from('expenses').select('*')
+        .order('purchase_date', { ascending: false }).order('id') // 'id' desempata: páginas sem repetir nem pular linhas
+        .range(from, from + PAGE - 1);
+      if (error) throw error;
+      all.push(...data);
+      if (data.length < PAGE) return all;
+    }
+  }
+
+  // Cada carregamento ganha um número; a resposta é descartada se outro carregamento começou,
+  // se um formulário foi aberto (para não sobrescrever o que for salvo nele) ou se saiu da conta.
+  let loadSeq = 0;
   async function loadData() {
-    const [c, e] = await Promise.all([
-      sb.from('cards').select('*').order('created_at'),
-      sb.from('expenses').select('*').order('purchase_date', { ascending: false }),
-    ]);
-    if (c.error || e.error) { toast('Erro ao carregar dados: ' + (c.error || e.error).message); return; }
-    state.cards = c.data;
-    state.expenses = e.data;
+    const seq = ++loadSeq;
+    try {
+      const [c, expenses] = await Promise.all([sb.from('cards').select('*').order('created_at'), fetchAllExpenses()]);
+      if (c.error) throw c.error;
+      if (seq !== loadSeq) return;
+      Object.assign(state, { cards: c.data, expenses, loadedAt: Date.now(), loadError: false });
+    } catch (err) {
+      if (seq !== loadSeq || state.loadedAt) return; // falhou só a atualização: mantém o que já está na tela
+      state.loadError = true;
+      toast('Erro ao carregar dados: ' + err.message);
+    }
     render();
   }
+
+  // Ao voltar para o app: recarrega se o carregamento falhou ou se os dados têm mais de 5 min
+  // (ex.: gastos lançados em outro aparelho enquanto este ficou aberto)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !state.session || !$('#sheet').hidden) return;
+    if (Date.now() - state.loadedAt > 5 * 60 * 1000) loadData();
+  });
 
   // ---------- Autenticação ----------
   let signUpMode = false;
 
   function showAuth() { $('#auth').hidden = false; $('#app').hidden = true; }
-  function showApp() { $('#auth').hidden = true; $('#app').hidden = false; loadData(); loadAvatar(); }
+  function showApp() { $('#auth').hidden = true; $('#app').hidden = false; render(); loadData(); loadAvatar(); }
 
   $('#auth-toggle').onclick = () => {
     signUpMode = !signUpMode;
@@ -164,13 +239,16 @@
     state.session = session;
     if (session && !had) showApp();
     if (!session) {
-      state.cards = []; state.expenses = []; state.avatarUrl = null;
+      loadSeq++; // descarta carregamentos em andamento
+      Object.assign(state, { cards: [], expenses: [], avatarUrl: null, loadedAt: 0, loadError: false });
       if (state.tab !== 'resumo') setTab('resumo'); // próxima entrada começa no Resumo
       showAuth();
     }
   });
 
   // ---------- Navegação ----------
+  const isMonthlyTab = () => !['cartoes', 'perfil'].includes(state.tab); // abas com ‹ mês ›
+
   // ---------- Botão "voltar" do celular ----------
   // Histórico: [base] → [outra aba] → [formulário aberto]. Voltar fecha o formulário, depois volta ao Resumo,
   // e só então sai do app.
@@ -215,8 +293,7 @@
     const EDGE = 28; // ignora a borda da tela (gesto "voltar" do Android)
     document.addEventListener('touchstart', (e) => {
       x0 = null;
-      if (e.touches.length !== 1 || !$('#sheet').hidden || $('#app').hidden) return;
-      if (['cartoes', 'perfil'].includes(state.tab)) return;
+      if (e.touches.length !== 1 || !$('#sheet').hidden || $('#app').hidden || !isMonthlyTab()) return;
       const t = e.touches[0];
       if (t.clientX < EDGE || t.clientX > innerWidth - EDGE) return;
       if (t.target.closest('input, select, textarea, .tabbar')) return;
@@ -236,16 +313,24 @@
 
   // ---------- Render ----------
   function render() {
-    const monthly = !['cartoes', 'perfil'].includes(state.tab);
+    const monthly = isMonthlyTab();
+    const waiting = !state.loadedAt && state.tab !== 'perfil'; // dados ainda não chegaram (ou falharam)
     $('#month-title').textContent = monthly ? monthName(state.month) : (state.tab === 'perfil' ? 'Perfil' : 'Cartões');
     $('#prev-month').style.visibility = monthly ? 'visible' : 'hidden';
     $('#next-month').style.visibility = monthly ? 'visible' : 'hidden';
-    $('#fab').hidden = state.tab === 'perfil';
+    $('#fab').hidden = state.tab === 'perfil' || waiting;
     $('#fab').setAttribute('aria-label', state.tab === 'cartoes' ? 'Novo cartão' : 'Novo gasto');
     const views = { resumo: renderResumo, gastos: renderGastos, faturas: renderFaturas, cartoes: renderCartoes, perfil: renderPerfil };
-    $('#view').innerHTML = views[state.tab]();
+    $('#view').innerHTML = waiting ? renderWaiting() : views[state.tab]();
     paintAvatars();
     bindView();
+  }
+
+  // Enquanto os dados não chegam: "Carregando…" ou, se falhou, um botão para tentar de novo
+  function renderWaiting() {
+    if (!state.loadError) return emptyState('Carregando…', '');
+    return emptyState('Não foi possível carregar seus dados', 'Confira sua conexão com a internet.',
+      '<div style="margin-top:14px"><button class="btn primary small" id="retry">Tentar de novo</button></div>');
   }
 
   function renderResumo() {
@@ -291,7 +376,7 @@
     const where = e.card ? esc(e.card.name) : 'Pix/boleto';
     const lbl = instLabel(e);
     const inst = lbl ? ` · ${e.exp.recurring ? '🔁 ' : ''}${lbl}` : '';
-    const split = e.exp.split_divisor > 1 ? ` <span class="tag">/${e.exp.split_divisor}</span>` : '';
+    const split = e.div > 1 ? ` <span class="tag">/${e.div}</span>` : '';
     return `
       <li class="item tap" data-exp="${e.exp.id}">
         <div class="dot">${CAT_ICON[e.exp.category] || '📦'}</div>
@@ -299,7 +384,7 @@
           <div class="title">${esc(e.exp.description)}${split}</div>
           <div class="sub">${where}${inst} · ${e.exp.recurring ? 'dia ' + parseDate(e.exp.purchase_date).d : fmtDate(e.exp.purchase_date)}</div>
         </div>
-        <div class="val num">${brl(e.mine)}${e.exp.split_divisor > 1 ? `<small>de ${brl(e.total)}</small>` : ''}</div>
+        <div class="val num">${brl(e.mine)}${e.div > 1 ? `<small>de ${brl(e.total)}</small>` : ''}</div>
       </li>`;
   }
 
@@ -359,11 +444,11 @@
           </li>`).join('')}
       </ul></section>
       <p class="muted" style="text-align:center;font-size:13px">
-        Compras feitas depois do dia de fechamento entram na fatura seguinte.</p>`;
+        Compras feitas a partir do dia do fechamento entram na fatura seguinte.</p>`;
   }
 
-  function emptyState(title, sub) {
-    return `<div class="empty"><b>${esc(title)}</b>${esc(sub)}</div>`;
+  function emptyState(title, sub, extraHtml = '') {
+    return `<div class="empty"><b>${esc(title)}</b>${esc(sub)}${extraHtml}</div>`;
   }
 
   // ---------- Perfil ----------
@@ -523,6 +608,7 @@
       el.onclick = () => openCardForm(state.cards.find((x) => x.id === el.dataset.card));
     });
     const ex = $('#export'); if (ex) ex.onclick = exportExcel;
+    const rt = $('#retry'); if (rt) rt.onclick = () => { state.loadError = false; render(); loadData(); };
     const lo = $('#logout'); if (lo) lo.onclick = () => { if (confirm('Sair da conta?')) sb.auth.signOut(); };
     bindPerfil();
   }
@@ -534,6 +620,7 @@
     sh.hidden = false;
     $('#sheet-backdrop').hidden = false;
     document.body.style.overflow = 'hidden';
+    loadSeq++; // descarta atualização em andamento (não pode sobrescrever o que for salvo aqui)
     if (!nav.sheetPushed) { history.pushState({ sheet: true }, ''); nav.sheetPushed = true; }
   }
   function closeSheet(fromPop = false) {
@@ -564,21 +651,24 @@
   // ---------- Formulário de gasto ----------
   // Tipos: 'single' (única) | 'installment' (parcelada, valor total dividido) | 'recurring' (mensal fixa: valor cheio todo mês)
   function openExpenseForm(exp) {
-    const e = exp || { description: '', amount: '', category: 'Mercado', purchase_date: todayStr(), card_id: '', installments: 1, split_divisor: 1, recurring: false, recur_count: null };
+    const e = exp || { description: '', category: 'Mercado', purchase_date: todayStr(), card_id: '', installments: 1, split_divisor: 1, recurring: false, recur_count: null };
     const kind = e.recurring ? 'recurring' : e.installments > 1 ? 'installment' : 'single';
     const payOpts = [['', '💵 Pix / boleto'], ...state.cards.map((c) => [c.id, `▭ ${esc(c.name)}`])];
-    const card0 = state.cards.find((c) => c.id === e.card_id) || null;
+    const card0 = cardById(e.card_id);
     const canEnd = exp && exp.recurring && state.month >= startMonth(exp, card0);
+    // Conta fixa aberta num mês depois do 1º: mudar valor, cartão ou divisão vale a partir deste mês
+    const fromIdx = exp && exp.recurring && state.month > startMonth(exp, card0) ? state.month : null;
+    const cur = exp && exp.recurring ? valuesAt(exp, Math.max(state.month, startMonth(exp, card0))) : moneyOf(e); // valores do mês na tela
     openSheet(`
       <h3>${exp ? 'Editar gasto' : 'Novo gasto'}</h3>
       <form id="exp-form" novalidate>
         <div><label style="margin-bottom:6px">Tipo</label>${chipGroup('kind', [['single', 'Única'], ['installment', 'Parcelada'], ['recurring', '🔁 Mensal fixa']], kind)}</div>
         <label><span id="amount-label">Valor total da compra</span>
           <input class="amount-input num" name="amount" inputmode="decimal" placeholder="0,00" required
-            value="${exp ? String(Number(e.amount).toFixed(2)).replace('.', ',') : ''}"></label>
+            value="${exp ? cur.amount.toFixed(2).replace('.', ',') : ''}"></label>
         <label>Descrição<input name="description" maxlength="80" required placeholder="Ex.: Mercado, Internet, Financiamento" value="${esc(e.description)}"></label>
         <div><label style="margin-bottom:6px">Categoria</label>${chipGroup('category', CATEGORIES.map(([c, i]) => [c, `${i} ${c}`]), e.category)}</div>
-        <div><label style="margin-bottom:6px">Pagamento</label>${chipGroup('card', payOpts, e.card_id || '')}</div>
+        <div><label style="margin-bottom:6px">Pagamento</label>${chipGroup('card', payOpts, cur.card_id || '')}</div>
         <div class="grid2">
           <label><span id="date-label">Data da compra</span><input type="date" name="purchase_date" required value="${e.purchase_date}"></label>
           <label id="inst-wrap">Parcelas
@@ -587,7 +677,7 @@
           <label id="recur-wrap">Por quantos meses?
             <input name="recur_count" type="number" min="1" max="600" inputmode="numeric" placeholder="Sem fim" value="${e.recur_count || ''}"></label>
         </div>
-        <div><label style="margin-bottom:6px">Divisão com a namorada</label>${chipGroup('split', Object.entries(SPLIT_LABEL), e.split_divisor)}</div>
+        <div><label style="margin-bottom:6px">Divisão com a namorada</label>${chipGroup('split', Object.entries(SPLIT_LABEL), cur.split_divisor)}</div>
         <div class="preview" id="exp-preview"></div>
         <p class="msg error" id="exp-msg"></p>
         <div class="sheet-actions">
@@ -598,26 +688,45 @@
       </form>`);
 
     const form = $('#exp-form');
-    const update = () => {
+    // Lê o formulário no formato da tabela
+    const readRow = () => {
       const k = chipVal(form, 'kind');
-      const card = state.cards.find((c) => c.id === chipVal(form, 'card'));
+      const rc = parseInt(form.recur_count.value, 10);
+      return {
+        description: form.description.value.trim(),
+        amount: parseMoney(form.amount.value),
+        category: chipVal(form, 'category') || 'Outros',
+        purchase_date: form.purchase_date.value,
+        card_id: chipVal(form, 'card') || null,
+        installments: k === 'installment' ? Number(form.installments.value) : 1,
+        recurring: k === 'recurring',
+        recur_count: k === 'recurring' && rc > 0 ? Math.min(rc, 600) : null,
+        split_divisor: Number(chipVal(form, 'split')) || 1,
+      };
+    };
+    const isForward = (row) => fromIdx !== null && row.recurring && !sameMoney(moneyOf(row), valuesAt(exp, fromIdx));
+
+    const update = () => {
+      const row = readRow();
+      const k = chipVal(form, 'kind');
+      const card = cardById(row.card_id);
       $('#inst-wrap').hidden = k !== 'installment';
       $('#recur-wrap').hidden = k !== 'recurring';
       $('#amount-label').textContent = k === 'recurring' ? 'Valor por mês' : 'Valor total da compra';
       $('#date-label').textContent = k === 'recurring' ? 'Primeiro mês (data)' : 'Data da compra';
-      const amount = parseMoney(form.amount.value);
-      const div = Number(chipVal(form, 'split'));
+      const { amount, split_divisor: div } = row;
       const pv = $('#exp-preview');
       if (!(amount > 0)) { pv.textContent = 'Digite o valor para ver o resumo.'; return; }
-      const start = form.purchase_date.value ? (card ? invoiceMonth(form.purchase_date.value, card) : startMonth({ purchase_date: form.purchase_date.value }, null)) : null;
+      const start = row.purchase_date ? startMonth(row, card) : null;
       let txt;
       if (k === 'recurring') {
-        const n = parseInt(form.recur_count.value, 10);
+        const n = row.recur_count;
         txt = `${brl(amount)} todo mês`;
         if (div > 1) txt += ` · sua parte ${brl(amount / div)}`;
-        if (start !== null) txt += n > 0 ? ` · de ${monthName(start)} até ${monthName(start + n - 1)} (${n}x)` : ` · a partir de ${monthName(start)}, sem data para acabar`;
+        if (isForward(row)) txt += ` · vale a partir de ${monthName(fromIdx)} (os meses anteriores não mudam)`;
+        else if (start !== null) txt += n ? ` · de ${monthName(start)} até ${monthName(start + n - 1)} (${n}x)` : ` · a partir de ${monthName(start)}, sem data para acabar`;
       } else if (k === 'installment') {
-        const n = Number(form.installments.value);
+        const n = row.installments;
         txt = `${n}x de ${brl(amount / n)}`;
         if (div > 1) txt += ` · sua parte ${brl(amount / n / div)} por mês`;
         if (start !== null) txt += ` · de ${monthName(start)} até ${monthName(start + n - 1)}`;
@@ -648,28 +757,21 @@
 
     form.onsubmit = async (ev) => {
       ev.preventDefault();
-      const k = chipVal(form, 'kind');
-      const rc = parseInt(form.recur_count.value, 10);
-      const row = {
-        description: form.description.value.trim(),
-        amount: parseMoney(form.amount.value),
-        category: chipVal(form, 'category') || 'Outros',
-        purchase_date: form.purchase_date.value,
-        card_id: chipVal(form, 'card') || null,
-        installments: k === 'installment' ? Number(form.installments.value) : 1,
-        recurring: k === 'recurring',
-        recur_count: k === 'recurring' && rc > 0 ? Math.min(rc, 600) : null,
-        split_divisor: Number(chipVal(form, 'split')) || 1,
-      };
+      const row = readRow();
       const msg = $('#exp-msg');
       if (!(row.amount > 0)) { msg.textContent = 'Informe um valor válido.'; return; }
       if (!row.description) { msg.textContent = 'Informe uma descrição.'; return; }
       if (!row.purchase_date) { msg.textContent = 'Informe a data.'; return; }
+      const forward = isForward(row);
+      // Conta fixa continua conta fixa: valor/cartão/divisão novos valem a partir do mês na tela
+      const data = exp && exp.recurring && row.recurring
+        ? mergeForward(exp, row, Math.max(state.month, startMonth(exp, card0)))
+        : { ...row, recur_changes: [] };
       const btn = form.querySelector('[type=submit]');
       btn.disabled = true;
-      const ok = await save(row);
+      const ok = await save(data);
       btn.disabled = false;
-      if (ok) toast(exp ? 'Gasto atualizado' : 'Gasto adicionado');
+      if (ok) toast(forward ? `Alterado a partir de ${monthName(fromIdx)}` : exp ? 'Gasto atualizado' : 'Gasto adicionado');
     };
 
     const end = $('#exp-end');
@@ -726,9 +828,12 @@
       const msg = $('#card-msg');
       if (!row.name) { msg.textContent = 'Informe o nome do cartão.'; return; }
       if (!(row.closing_day >= 1 && row.closing_day <= 31 && row.due_day >= 1 && row.due_day <= 31)) { msg.textContent = 'Os dias devem estar entre 1 e 31.'; return; }
+      const btn = form.querySelector('[type=submit]');
+      btn.disabled = true; // evita cadastrar o mesmo cartão duas vezes com toque duplo
       const res = card
         ? await sb.from('cards').update(row).eq('id', card.id).select().single()
         : await sb.from('cards').insert(row).select().single();
+      btn.disabled = false;
       if (res.error) { msg.textContent = 'Erro ao salvar: ' + res.error.message; return; }
       if (card) state.cards = state.cards.map((x) => (x.id === card.id ? res.data : x));
       else state.cards.push(res.data);
@@ -739,7 +844,7 @@
 
     const del = $('#card-del');
     if (del) del.onclick = async () => {
-      const used = state.expenses.filter((x) => x.card_id === card.id).length;
+      const used = state.expenses.filter((x) => x.card_id === card.id || (x.recur_changes || []).some((c) => c.card_id === card.id)).length;
       const warn = used ? `\n\n${used} gasto(s) desse cartão passarão a contar como "Pix / boleto".` : '';
       if (!confirm(`Excluir o cartão "${card.name}"?${warn}`)) return;
       const { error } = await sb.from('cards').delete().eq('id', card.id);
@@ -783,7 +888,7 @@
         head.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9EAD3' } };
         const first = head.number + 1;
         inv.items.forEach((e) => {
-          const name = e.exp.description.toUpperCase() + (e.exp.split_divisor > 1 ? ` /${e.exp.split_divisor}` : '');
+          const name = e.exp.description.toUpperCase() + (e.div > 1 ? ` /${e.div}` : '');
           const parc = e.exp.recurring && !e.n ? '(FIXO)' : e.n > 1 ? `(${pad2(e.inst)}/${pad2(e.n)})` : '';
           const r = ws.addRow([name, parc, e.mine]);
           r.getCell(2).alignment = { horizontal: 'center' };
@@ -848,5 +953,5 @@
       })
       .catch(() => {});
   }
-  sb.auth.getSession().then(({ data }) => { if (!data.session) showAuth(); });
+  // A tela inicial (login ou app) é decidida pelo onAuthStateChange, que dispara ao abrir (evento INITIAL_SESSION)
 })();

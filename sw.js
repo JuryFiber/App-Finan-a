@@ -1,5 +1,5 @@
 // Service worker: deixa o app abrir rápido e instalável. Dados sempre vêm do Supabase (não são cacheados).
-const CACHE = 'financas-v8';
+const CACHE = 'financas-v10';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './config.js', './manifest.webmanifest', './icon.svg', './icon-maskable.svg'];
 
 self.addEventListener('install', (e) => {
@@ -21,8 +21,10 @@ self.addEventListener('fetch', (e) => {
     // cache: 'no-cache' obriga a conferir com o servidor se há versão nova (ignora os 10 min de cache do GitHub Pages)
     fetch(e.request, { cache: 'no-cache' })
       .then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy));
+        if (res.ok) { // só guarda respostas boas (um erro 404/500 não pode virar a cópia offline)
+          const copy = res.clone();
+          e.waitUntil(caches.open(CACHE).then((c) => c.put(e.request, copy)));
+        }
         return res;
       })
       .catch(() => caches.match(e.request).then((r) => r || caches.match('./index.html')))
