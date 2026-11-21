@@ -262,7 +262,7 @@
       else if (tab === 'resumo' && nav.tabPushed) { nav.tabPushed = false; historyBack(); }
     }
     state.tab = tab;
-    document.querySelectorAll('.tabbar button').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
+    document.querySelectorAll('.tabbar button[data-tab]').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
     render();
     window.scrollTo(0, 0);
   }
@@ -273,7 +273,7 @@
     if (nav.tabPushed) { nav.tabPushed = false; setTab('resumo', true); }
   });
 
-  document.querySelectorAll('.tabbar button').forEach((b) => {
+  document.querySelectorAll('.tabbar button[data-tab]').forEach((b) => {
     b.onclick = () => { if (b.dataset.tab !== state.tab) setTab(b.dataset.tab); };
   });
   function changeMonth(delta) {
@@ -320,7 +320,7 @@
     $('#next-month').style.visibility = monthly ? 'visible' : 'hidden';
     $('#fab').hidden = state.tab === 'perfil' || waiting;
     $('#fab').setAttribute('aria-label', state.tab === 'cartoes' ? 'Novo cartão' : 'Novo gasto');
-    const views = { resumo: renderResumo, gastos: renderGastos, faturas: renderFaturas, cartoes: renderCartoes, perfil: renderPerfil };
+    const views = { resumo: renderResumo, gastos: renderGastos, cartoes: renderCartoes, perfil: renderPerfil };
     $('#view').innerHTML = waiting ? renderWaiting() : views[state.tab]();
     paintAvatars();
     bindView();
@@ -358,7 +358,7 @@
         </div>
       </section>
       <section class="card">
-        <h2>Por categoria</h2>
+        <h2>Categorias</h2>
         ${cats.map(([c, v]) => `
           <div class="bar-row"><span>${CAT_ICON[c] || '📦'} ${esc(c)}</span><b class="num">${brl(v)}</b>
             <div class="bar"><i style="width:${Math.max(3, (v / maxCat) * 100)}%"></i></div></div>`).join('')}
@@ -393,11 +393,30 @@
     if (!list.length) return emptyState('Nenhum gasto neste mês', 'Compras no cartão aparecem no mês da fatura.');
     const fixas = list.filter((e) => !e.card && e.exp.recurring);
     const vista = list.filter((e) => !e.card && !e.exp.recurring);
-    const cartao = list.filter((e) => e.card);
+    const invs = invoicesFor(state.month);
+    const block = (title, items) => {
+      const total = round2(items.reduce((s, e) => s + e.mine, 0));
+      return `<div class="day-head">${title}</div><section class="card"><ul class="list">${items.map(entryRow).join('')}</ul>
+        <div class="invoice-total"><span>Total (minha parte)</span><span class="num">${brl(total)}</span></div></section>`;
+    };
     let html = '';
-    if (fixas.length) html += `<div class="day-head">Contas fixas do mês</div><section class="card"><ul class="list">${fixas.map(entryRow).join('')}</ul></section>`;
-    if (vista.length) html += `<div class="day-head">Pix / boleto / dinheiro</div><section class="card"><ul class="list">${vista.map(entryRow).join('')}</ul></section>`;
-    if (cartao.length) html += `<div class="day-head">No cartão (fatura deste mês)</div><section class="card"><ul class="list">${cartao.map(entryRow).join('')}</ul></section>`;
+    if (fixas.length) html += block('Contas fixas do mês', fixas);
+    if (vista.length) html += block('Pix / boleto / dinheiro', vista);
+    if (invs.length) {
+      html += `<div class="day-head cards-head"><span>Cartões (faturas deste mês)</span>
+        <button class="btn small" id="export">⬇ Excel</button></div>`;
+      html += invs.map((inv) => `
+        <section class="card">
+          <div class="invoice-head">
+            <span class="swatch" style="background:${esc(inv.card.color)}"></span>
+            <h2>${esc(inv.card.name)}</h2>
+            <span class="muted">vence ${dueDate(inv.card, state.month)}</span>
+          </div>
+          <ul class="list">${inv.items.map(entryRow).join('')}</ul>
+          <div class="invoice-total"><span>Total (minha parte)</span><span class="num">${brl(inv.total)}</span></div>
+        </section>`).join('');
+      if (invs.length > 1) html += `<section class="card sum-all"><span>Soma dos cartões</span><span class="num">${brl(round2(invs.reduce((s, i) => s + i.total, 0)))}</span></section>`;
+    }
     return html;
   }
 
@@ -409,26 +428,6 @@
         return { card, items, total: round2(items.reduce((s, e) => s + e.mine, 0)) };
       })
       .filter((inv) => inv.items.length);
-  }
-
-  function renderFaturas() {
-    if (!state.cards.length) return emptyState('Nenhum cartão cadastrado', 'Cadastre seus cartões na aba Cartões.');
-    const invs = invoicesFor(state.month);
-    if (!invs.length) return emptyState('Nenhuma fatura neste mês', 'Lance compras no cartão para vê-las aqui.');
-    const sum = round2(invs.reduce((s, i) => s + i.total, 0));
-    return `
-      <div class="row-actions"><button class="btn primary small" id="export">⬇ Exportar Excel</button></div>
-      ${invs.map((inv) => `
-        <section class="card">
-          <div class="invoice-head">
-            <span class="swatch" style="background:${esc(inv.card.color)}"></span>
-            <h2>${esc(inv.card.name)}</h2>
-            <span class="muted">vence ${dueDate(inv.card, state.month)}</span>
-          </div>
-          <ul class="list">${inv.items.map(entryRow).join('')}</ul>
-          <div class="invoice-total"><span>Total (minha parte)</span><span class="num">${brl(inv.total)}</span></div>
-        </section>`).join('')}
-      <section class="card sum-all"><span>Soma dos cartões</span><span class="num">${brl(sum)}</span></section>`;
   }
 
   function renderCartoes() {
