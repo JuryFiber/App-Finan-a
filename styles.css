@@ -12,9 +12,9 @@
   --shadow: 0 6px 24px rgba(15, 17, 21, .08);
   --radius: 16px;
   --tabbar-h: 64px;
-  /* cor de cada categoria (ordem de CATEGORIES no app.js) */
-  --cat-0: #eb6834; --cat-1: #eda100; --cat-2: #2a78d6; --cat-3: #6250d6; --cat-4: #1baf7a;
-  --cat-5: #e34948; --cat-6: #e87ba4; --cat-7: #008300; --cat-8: #0891b2; --cat-9: #8a8f98;
+  /* cor de cada categoria (ordem de CATEGORIES no app.js): escala arco-íris, a rosca segue essa ordem */
+  --cat-0: #f2602e; --cat-1: #e02b7c; --cat-2: #c026a3; --cat-3: #8b3fe0; --cat-4: #a690f5;
+  --cat-5: #3a7be8; --cat-6: #1fb2d4; --cat-7: #0d9488; --cat-8: #3b9e2f; --cat-9: #9bc414;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -29,16 +29,16 @@
     --accent-soft: #143426;
     --danger: #f06a6a;
     --shadow: 0 6px 24px rgba(0, 0, 0, .35);
-    --cat-0: #d95926; --cat-1: #c98500; --cat-2: #3987e5; --cat-3: #9085e9; --cat-4: #199e70;
-    --cat-5: #e66767; --cat-6: #d55181; --cat-7: #0ca30c; --cat-8: #1b95b0; --cat-9: #7c828c;
+    --cat-0: #e8602f; --cat-1: #e6418a; --cat-2: #cc44b0; --cat-3: #9b55ec; --cat-4: #9282ea;
+    --cat-5: #3d70d6; --cat-6: #1a9fc0; --cat-7: #0c917f; --cat-8: #3a9a2c; --cat-9: #7e9e12;
   }
 }
 :root[data-theme="dark"] {
   --bg: #0f1115; --surface: #181b21; --surface-2: #22262e; --text: #eef0f3; --muted: #9aa1ad;
   --border: #2a2f38; --accent: #2fcf8a; --accent-ink: #062b1b; --accent-soft: #143426;
   --danger: #f06a6a; --shadow: 0 6px 24px rgba(0, 0, 0, .35);
-  --cat-0: #d95926; --cat-1: #c98500; --cat-2: #3987e5; --cat-3: #9085e9; --cat-4: #199e70;
-  --cat-5: #e66767; --cat-6: #d55181; --cat-7: #0ca30c; --cat-8: #1b95b0; --cat-9: #7c828c;
+  --cat-0: #e8602f; --cat-1: #e6418a; --cat-2: #cc44b0; --cat-3: #9b55ec; --cat-4: #9282ea;
+  --cat-5: #3d70d6; --cat-6: #1a9fc0; --cat-7: #0c917f; --cat-8: #3a9a2c; --cat-9: #7e9e12;
 }
 
 * { box-sizing: border-box; }
@@ -218,7 +218,7 @@ html, body { overflow-x: clip; overscroll-behavior-x: none; max-width: 100%; }
 /* ---------- Rosca de categorias ---------- */
 .donut { position: relative; width: min(240px, 72%); margin: 4px auto 18px; }
 .donut svg { display: block; width: 100%; height: auto; overflow: visible; }
-.donut .seg { fill: none; }
+.donut .seg { stroke-linejoin: round; }
 .seg-lbl { font-size: 11px; font-weight: 800; fill: #fff; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
 .seg-lbl.ink-dark { fill: #1a1a1a; }
 .donut-center { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 2px; }

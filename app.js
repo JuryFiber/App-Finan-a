@@ -14,7 +14,7 @@
   // Cada categoria tem a sua cor fixa (CSS --cat-0..9, na ordem de CATEGORIES); desconhecida = "Outros"
   const catIdx = (c) => { const i = CATEGORIES.findIndex(([n]) => n === c); return i < 0 ? CATEGORIES.length - 1 : i; };
   const catColor = (c) => `var(--cat-${catIdx(c)})`;
-  const CAT_DARK_INK = new Set([1, 4, 6, 9]); // cores claras: % escrito em tinta escura
+  const CAT_DARK_INK = new Set([4, 6, 9]); // cores claras: % escrito em tinta escura
   const COLORS = ['#8a05be', '#ff7a00', '#0b6bcb', '#16a36a', '#d64545', '#111827', '#c2185b', '#00897b'];
 
   // ---------- Estado ----------
@@ -381,22 +381,28 @@
 
   const pct = (v, total) => (total > 0 ? Math.round((v / total) * 100) : 0);
 
-  // Rosca por categoria: fatias com um pequeno espaço entre elas, % em cada fatia e o total no meio
+  // Rosca por categoria, no estilo arco-íris: as fatias seguem a ordem das cores (CATEGORIES), não o tamanho,
+  // para a escala ficar contínua. Fatias com cantos arredondados, % em cada uma e o total no meio.
   function donut(cats, total) {
     if (!(total > 0)) return '';
-    const R = 80, W = 28, C = 2 * Math.PI * R, GAP = cats.length > 1 ? 3 : 0;
-    let off = 0;
-    const segs = cats.map(([c, v]) => {
-      const len = (v / total) * C, i = catIdx(c);
-      const mid = ((off + len / 2) / C) * 2 * Math.PI - Math.PI / 2;
-      const p = pct(v, total);
-      const seg = `
-        <circle class="seg" cx="100" cy="100" r="${R}" stroke-width="${W}" style="stroke:var(--cat-${i})"
-          stroke-dasharray="${Math.max(0.5, len - GAP).toFixed(2)} ${C.toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
-          transform="rotate(-90 100 100)"><title>${esc(c)}: ${brl(v)} (${p}%)</title></circle>
+    const R = 80, W = 28, ROUND = 7;                       // raio médio, espessura, arredondamento dos cantos
+    const ro = R + W / 2 - ROUND / 2, ri = R - W / 2 + ROUND / 2;
+    const gap = cats.length > 1 ? (4 + ROUND) / ri : 0;     // espaço entre fatias (em ângulo)
+    const pt = (r, a) => `${(100 + r * Math.cos(a)).toFixed(2)} ${(100 + r * Math.sin(a)).toFixed(2)}`;
+    const ordered = [...cats].sort((a, b) => catIdx(a[0]) - catIdx(b[0]));
+    let a0 = -Math.PI / 2;
+    const segs = ordered.map(([c, v]) => {
+      const sweep = (v / total) * 2 * Math.PI, i = catIdx(c), p = pct(v, total);
+      const mid = a0 + sweep / 2;
+      let s0 = a0 + gap / 2, s1 = a0 + sweep - gap / 2;
+      if (s1 - s0 < 0.02) { s0 = mid - 0.01; s1 = mid + 0.01; } // fatia minúscula: um tracinho
+      if (cats.length === 1) { s0 = -Math.PI / 2; s1 = s0 + 2 * Math.PI - 0.0001; }
+      const big = s1 - s0 > Math.PI ? 1 : 0;
+      const d = `M${pt(ro, s0)} A${ro} ${ro} 0 ${big} 1 ${pt(ro, s1)} L${pt(ri, s1)} A${ri} ${ri} 0 ${big} 0 ${pt(ri, s0)} Z`;
+      a0 += sweep;
+      return `
+        <path class="seg" d="${d}" style="fill:var(--cat-${i});stroke:var(--cat-${i})" stroke-width="${ROUND}"><title>${esc(c)}: ${brl(v)} (${p}%)</title></path>
         ${p >= 6 ? `<text x="${(100 + R * Math.cos(mid)).toFixed(1)}" y="${(100 + R * Math.sin(mid)).toFixed(1)}" class="seg-lbl${CAT_DARK_INK.has(i) ? ' ink-dark' : ''}">${p}%</text>` : ''}`;
-      off += len;
-      return seg;
     }).join('');
     return `
       <div class="donut" role="img" aria-label="Gastos por categoria: ${cats.map(([c, v]) => `${esc(c)} ${pct(v, total)}%`).join(', ')}">
