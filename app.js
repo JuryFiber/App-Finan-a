@@ -677,7 +677,7 @@
           <label id="recur-wrap">Por quantos meses?
             <input name="recur_count" type="number" min="1" max="600" inputmode="numeric" placeholder="Sem fim" value="${e.recur_count || ''}"></label>
         </div>
-        <div><label style="margin-bottom:6px">Divisão com a namorada</label>${chipGroup('split', Object.entries(SPLIT_LABEL), cur.split_divisor)}</div>
+        <div><label style="margin-bottom:6px">Divisão</label>${chipGroup('split', Object.entries(SPLIT_LABEL), cur.split_divisor)}</div>
         <div class="preview" id="exp-preview"></div>
         <p class="msg error" id="exp-msg"></p>
         <div class="sheet-actions">
