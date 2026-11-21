@@ -318,6 +318,7 @@
     $('#prev-month').style.visibility = monthly ? 'visible' : 'hidden';
     $('#next-month').style.visibility = monthly ? 'visible' : 'hidden';
     $('#fab').hidden = state.tab === 'perfil' || waiting;
+    $('.tabbar').classList.toggle('no-fab', $('#fab').hidden); // sem o "+", os 4 ícones se espalham por igual
     $('#fab').setAttribute('aria-label', state.tab === 'cartoes' ? 'Novo cartão' : 'Novo gasto');
     const views = { resumo: renderResumo, gastos: renderGastos, cartoes: renderCartoes, perfil: renderPerfil };
     $('#view').innerHTML = waiting ? renderWaiting() : views[state.tab]();

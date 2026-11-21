@@ -101,10 +101,13 @@ main { max-width: 640px; margin: 0 auto; padding: 4px 16px calc(var(--tabbar-h) 
 .tabbar .fab {
   justify-self: center; margin-top: -34px;
   width: 56px; height: 56px; border-radius: 50%; border: 0;
-  background: var(--text); color: var(--bg); font-size: 30px; line-height: 1;
+  background: var(--text); color: var(--bg); padding: 0;
+  display: grid; place-items: center;
   box-shadow: 0 0 0 5px var(--bg), 0 8px 18px rgba(0, 0, 0, .28);
 }
-.tabbar .fab[hidden] { display: block; visibility: hidden; } /* mantém o espaço no meio da barra */
+.tabbar .fab svg { width: 26px; height: 26px; display: block; }
+.tabbar.no-fab { grid-template-columns: repeat(4, 1fr); }
+.tabbar .fab[hidden] { display: none; }
 
 /* ---------- Cartões de conteúdo ---------- */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
