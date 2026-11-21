@@ -207,5 +207,3 @@ html, body { overflow-x: clip; overscroll-behavior-x: none; max-width: 100%; }
   max-width: calc(100% - 32px); box-shadow: var(--shadow);
 }
 
-.cards-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.cards-head .btn { text-transform: none; letter-spacing: 0; color: var(--text); font-size: 13px; padding: 6px 10px; }

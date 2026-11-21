@@ -12,7 +12,6 @@
   ];
   const CAT_ICON = Object.fromEntries(CATEGORIES);
   const COLORS = ['#8a05be', '#ff7a00', '#0b6bcb', '#16a36a', '#d64545', '#111827', '#c2185b', '#00897b'];
-  const SPLIT_LABEL = { 1: 'Só eu', 2: 'Dividir /2', 3: 'Dividir /3' };
 
   // ---------- Estado ----------
   const now = new Date();
@@ -337,8 +336,7 @@
     const list = entriesForMonth(state.month);
     if (!list.length) return emptyState('Nenhum gasto neste mês', 'Toque em + para lançar o primeiro.');
     const mine = round2(list.reduce((s, e) => s + e.mine, 0));
-    const hers = round2(list.reduce((s, e) => s + e.hers, 0));
-    const total = round2(mine + hers);
+    const onCard = round2(list.filter((e) => e.card).reduce((s, e) => s + e.mine, 0));
 
     const byCat = {};
     list.forEach((e) => { byCat[e.exp.category] = (byCat[e.exp.category] || 0) + e.mine; });
@@ -350,11 +348,11 @@
 
     return `
       <section class="card hero">
-        <div class="label">Minha parte no mês</div>
+        <div class="label">Gastos do mês</div>
         <div class="big num">${brl(mine)}</div>
         <div class="hero-row">
-          <div><small>A receber (divididos)</small><b class="num">${brl(hers)}</b></div>
-          <div><small>Total das compras</small><b class="num">${brl(total)}</b></div>
+          <div><small>No cartão</small><b class="num">${brl(onCard)}</b></div>
+          <div><small>Pix / boleto / dinheiro</small><b class="num">${brl(round2(mine - onCard))}</b></div>
         </div>
       </section>
       <section class="card">
@@ -376,47 +374,56 @@
     const where = e.card ? esc(e.card.name) : 'Pix/boleto';
     const lbl = instLabel(e);
     const inst = lbl ? ` · ${e.exp.recurring ? '🔁 ' : ''}${lbl}` : '';
-    const split = e.div > 1 ? ` <span class="tag">/${e.div}</span>` : '';
     return `
       <li class="item tap" data-exp="${e.exp.id}">
         <div class="dot">${CAT_ICON[e.exp.category] || '📦'}</div>
         <div class="grow">
-          <div class="title">${esc(e.exp.description)}${split}</div>
+          <div class="title">${esc(e.exp.description)}</div>
           <div class="sub">${where}${inst} · ${e.exp.recurring ? 'dia ' + parseDate(e.exp.purchase_date).d : fmtDate(e.exp.purchase_date)}</div>
         </div>
-        <div class="val num">${brl(e.mine)}${e.div > 1 ? `<small>de ${brl(e.total)}</small>` : ''}</div>
+        <div class="val num">${brl(e.mine)}</div>
       </li>`;
   }
 
-  function renderGastos() {
-    const list = entriesForMonth(state.month).sort((a, b) => b.exp.purchase_date.localeCompare(a.exp.purchase_date));
-    if (!list.length) return emptyState('Nenhum gasto neste mês', 'Compras no cartão aparecem no mês da fatura.');
+  // Blocos do mês (usados na aba Gastos e no Excel): contas fixas, Pix/boleto/dinheiro e um por cartão
+  function monthGroups(idx) {
+    const list = entriesForMonth(idx).sort((a, b) => b.exp.purchase_date.localeCompare(a.exp.purchase_date));
+    const sum = (items) => round2(items.reduce((s, e) => s + e.mine, 0));
+    const groups = [];
     const fixas = list.filter((e) => !e.card && e.exp.recurring);
     const vista = list.filter((e) => !e.card && !e.exp.recurring);
-    const invs = invoicesFor(state.month);
-    const block = (title, items) => {
-      const total = round2(items.reduce((s, e) => s + e.mine, 0));
-      return `<div class="day-head">${title}</div><section class="card"><ul class="list">${items.map(entryRow).join('')}</ul>
-        <div class="invoice-total"><span>Total (minha parte)</span><span class="num">${brl(total)}</span></div></section>`;
-    };
-    let html = '';
-    if (fixas.length) html += block('Contas fixas do mês', fixas);
-    if (vista.length) html += block('Pix / boleto / dinheiro', vista);
-    if (invs.length) {
-      html += `<div class="day-head cards-head"><span>Cartões (faturas deste mês)</span>
-        <button class="btn small" id="export">⬇ Excel</button></div>`;
-      html += invs.map((inv) => `
+    if (fixas.length) groups.push({ title: 'Contas fixas do mês', xlsTitle: 'CONTAS FIXAS', items: fixas, total: sum(fixas) });
+    if (vista.length) groups.push({ title: 'Pix / boleto / dinheiro', xlsTitle: 'PIX / BOLETO / DINHEIRO', items: vista, total: sum(vista) });
+    invoicesFor(idx).forEach((inv) => groups.push({
+      card: inv.card, title: inv.card.name, items: inv.items, total: inv.total,
+      xlsTitle: `CARTÃO ${inv.card.name.toUpperCase()} VENCIMENTO ${dueDate(inv.card, idx)}`,
+    }));
+    return groups;
+  }
+
+  function renderGastos() {
+    const groups = monthGroups(state.month);
+    if (!groups.length) return emptyState('Nenhum gasto neste mês', 'Compras no cartão aparecem no mês da fatura.');
+    const total = (v) => `<div class="invoice-total"><span>Total</span><span class="num">${brl(v)}</span></div>`;
+    let html = '<div class="row-actions"><button class="btn primary small" id="export">⬇ Exportar Excel</button></div>';
+    let cardsHead = false;
+    for (const g of groups) {
+      if (!g.card) {
+        html += `<div class="day-head">${g.title}</div><section class="card"><ul class="list">${g.items.map(entryRow).join('')}</ul>${total(g.total)}</section>`;
+        continue;
+      }
+      if (!cardsHead) { html += '<div class="day-head">Cartões (faturas deste mês)</div>'; cardsHead = true; }
+      html += `
         <section class="card">
           <div class="invoice-head">
-            <span class="swatch" style="background:${esc(inv.card.color)}"></span>
-            <h2>${esc(inv.card.name)}</h2>
-            <span class="muted">vence ${dueDate(inv.card, state.month)}</span>
+            <span class="swatch" style="background:${esc(g.card.color)}"></span>
+            <h2>${esc(g.card.name)}</h2>
+            <span class="muted">vence ${dueDate(g.card, state.month)}</span>
           </div>
-          <ul class="list">${inv.items.map(entryRow).join('')}</ul>
-          <div class="invoice-total"><span>Total (minha parte)</span><span class="num">${brl(inv.total)}</span></div>
-        </section>`).join('');
-      if (invs.length > 1) html += `<section class="card sum-all"><span>Soma dos cartões</span><span class="num">${brl(round2(invs.reduce((s, i) => s + i.total, 0)))}</span></section>`;
+          <ul class="list">${g.items.map(entryRow).join('')}</ul>${total(g.total)}
+        </section>`;
     }
+    html += `<section class="card sum-all"><span>Total do mês</span><span class="num">${brl(round2(groups.reduce((s, g) => s + g.total, 0)))}</span></section>`;
     return html;
   }
 
@@ -676,7 +683,6 @@
           <label id="recur-wrap">Por quantos meses?
             <input name="recur_count" type="number" min="1" max="600" inputmode="numeric" placeholder="Sem fim" value="${e.recur_count || ''}"></label>
         </div>
-        <div><label style="margin-bottom:6px">Divisão</label>${chipGroup('split', Object.entries(SPLIT_LABEL), cur.split_divisor)}</div>
         <div class="preview" id="exp-preview"></div>
         <p class="msg error" id="exp-msg"></p>
         <div class="sheet-actions">
@@ -700,7 +706,7 @@
         installments: k === 'installment' ? Number(form.installments.value) : 1,
         recurring: k === 'recurring',
         recur_count: k === 'recurring' && rc > 0 ? Math.min(rc, 600) : null,
-        split_divisor: Number(chipVal(form, 'split')) || 1,
+        split_divisor: 1, // divisão entre pessoas foi removida do app (2026-11-20)
       };
     };
     const isForward = (row) => fromIdx !== null && row.recurring && !sameMoney(moneyOf(row), valuesAt(exp, fromIdx));
@@ -713,7 +719,7 @@
       $('#recur-wrap').hidden = k !== 'recurring';
       $('#amount-label').textContent = k === 'recurring' ? 'Valor por mês' : 'Valor total da compra';
       $('#date-label').textContent = k === 'recurring' ? 'Primeiro mês (data)' : 'Data da compra';
-      const { amount, split_divisor: div } = row;
+      const { amount } = row;
       const pv = $('#exp-preview');
       if (!(amount > 0)) { pv.textContent = 'Digite o valor para ver o resumo.'; return; }
       const start = row.purchase_date ? startMonth(row, card) : null;
@@ -721,17 +727,14 @@
       if (k === 'recurring') {
         const n = row.recur_count;
         txt = `${brl(amount)} todo mês`;
-        if (div > 1) txt += ` · sua parte ${brl(amount / div)}`;
         if (isForward(row)) txt += ` · vale a partir de ${monthName(fromIdx)} (os meses anteriores não mudam)`;
         else if (start !== null) txt += n ? ` · de ${monthName(start)} até ${monthName(start + n - 1)} (${n}x)` : ` · a partir de ${monthName(start)}, sem data para acabar`;
       } else if (k === 'installment') {
         const n = row.installments;
         txt = `${n}x de ${brl(amount / n)}`;
-        if (div > 1) txt += ` · sua parte ${brl(amount / n / div)} por mês`;
         if (start !== null) txt += ` · de ${monthName(start)} até ${monthName(start + n - 1)}`;
       } else {
         txt = brl(amount);
-        if (div > 1) txt += ` · sua parte ${brl(amount / div)}`;
         if (card && start !== null) txt += ` · entra na fatura de ${monthName(start)}`;
       }
       pv.textContent = txt;
@@ -872,22 +875,22 @@
     try {
       if (!window.ExcelJS) await loadScript('https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js');
       const idx = state.month;
-      const invs = invoicesFor(idx);
+      const groups = monthGroups(idx);
       const wb = new ExcelJS.Workbook();
       const money = '"R$" #,##0.00';
 
-      // Página1: um bloco por cartão
+      // Página1: um bloco por grupo (contas fixas, Pix/boleto/dinheiro, cada cartão)
       const ws = wb.addWorksheet('Página1');
       ws.columns = [{ width: 44 }, { width: 12 }, { width: 16 }];
       const totalCells = [];
-      invs.forEach((inv) => {
-        const head = ws.addRow([`CARTÃO ${inv.card.name.toUpperCase()} VENCIMENTO ${dueDate(inv.card, idx)}`]);
+      groups.forEach((inv) => {
+        const head = ws.addRow([inv.xlsTitle]);
         ws.mergeCells(head.number, 1, head.number, 3);
         head.font = { bold: true };
         head.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9EAD3' } };
         const first = head.number + 1;
         inv.items.forEach((e) => {
-          const name = e.exp.description.toUpperCase() + (e.div > 1 ? ` /${e.div}` : '');
+          const name = e.exp.description.toUpperCase();
           const parc = e.exp.recurring && !e.n ? '(FIXO)' : e.n > 1 ? `(${pad2(e.inst)}/${pad2(e.n)})` : '';
           const r = ws.addRow([name, parc, e.mine]);
           r.getCell(2).alignment = { horizontal: 'center' };
@@ -900,28 +903,28 @@
         totalCells.push(`C${t.number}`);
         ws.addRow([]);
       });
-      const sumAll = round2(invs.reduce((s, i) => s + i.total, 0));
-      const s = ws.addRow(['SOMA DOS CARTOES:', '', { formula: totalCells.join('+') || '0', result: sumAll }]);
+      const sumAll = round2(groups.reduce((s, i) => s + i.total, 0));
+      const s = ws.addRow(['TOTAL DO MÊS:', '', { formula: totalCells.join('+') || '0', result: sumAll }]);
       s.font = { bold: true };
       s.getCell(3).numFmt = money;
 
-      // Página2: detalhe com a divisão
+      // Página2: detalhe de cada gasto
       const ws2 = wb.addWorksheet('Página2');
       ws2.columns = [
-        { header: 'Cartão', width: 14 }, { header: 'Data compra', width: 12 }, { header: 'Item', width: 36 },
-        { header: 'Parcela', width: 10 }, { header: 'Valor da parcela', width: 16 }, { header: 'Minha parte', width: 14 }, { header: 'Parte dela', width: 14 },
+        { header: 'Forma', width: 18 }, { header: 'Data', width: 12 }, { header: 'Item', width: 36 },
+        { header: 'Parcela', width: 10 }, { header: 'Valor da parcela', width: 16 },
       ];
       ws2.getRow(1).font = { bold: true };
-      invs.forEach((inv) => inv.items.forEach((e) => {
-        const r = ws2.addRow([inv.card.name, fmtDate(e.exp.purchase_date), e.exp.description, instLabel(e) || '1/1', e.total, e.mine, e.hers]);
-        [5, 6, 7].forEach((c) => (r.getCell(c).numFmt = money));
+      groups.forEach((g) => g.items.forEach((e) => {
+        const r = ws2.addRow([g.card ? g.card.name : (e.exp.recurring ? 'Conta fixa' : 'Pix/boleto/dinheiro'), fmtDate(e.exp.purchase_date), e.exp.description, instLabel(e) || '1/1', e.total]);
+        r.getCell(5).numFmt = money;
       }));
 
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `FATURA CARTÃO VENCIMENTO ${MONTHS[idx % 12].toUpperCase()} ${Math.floor(idx / 12)}.xlsx`;
+      a.download = `GASTOS ${MONTHS[idx % 12].toUpperCase()} ${Math.floor(idx / 12)}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
