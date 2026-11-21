@@ -12,6 +12,9 @@
   --shadow: 0 6px 24px rgba(15, 17, 21, .08);
   --radius: 16px;
   --tabbar-h: 64px;
+  /* cor de cada categoria (ordem de CATEGORIES no app.js) */
+  --cat-0: #eb6834; --cat-1: #eda100; --cat-2: #2a78d6; --cat-3: #6250d6; --cat-4: #1baf7a;
+  --cat-5: #e34948; --cat-6: #e87ba4; --cat-7: #008300; --cat-8: #0891b2; --cat-9: #8a8f98;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -26,12 +29,16 @@
     --accent-soft: #143426;
     --danger: #f06a6a;
     --shadow: 0 6px 24px rgba(0, 0, 0, .35);
+    --cat-0: #d95926; --cat-1: #c98500; --cat-2: #3987e5; --cat-3: #9085e9; --cat-4: #199e70;
+    --cat-5: #e66767; --cat-6: #d55181; --cat-7: #0ca30c; --cat-8: #1b95b0; --cat-9: #7c828c;
   }
 }
 :root[data-theme="dark"] {
   --bg: #0f1115; --surface: #181b21; --surface-2: #22262e; --text: #eef0f3; --muted: #9aa1ad;
   --border: #2a2f38; --accent: #2fcf8a; --accent-ink: #062b1b; --accent-soft: #143426;
   --danger: #f06a6a; --shadow: 0 6px 24px rgba(0, 0, 0, .35);
+  --cat-0: #d95926; --cat-1: #c98500; --cat-2: #3987e5; --cat-3: #9085e9; --cat-4: #199e70;
+  --cat-5: #e66767; --cat-6: #d55181; --cat-7: #0ca30c; --cat-8: #1b95b0; --cat-9: #7c828c;
 }
 
 * { box-sizing: border-box; }
@@ -120,16 +127,13 @@ main { max-width: 640px; margin: 0 auto; padding: 4px 16px calc(var(--tabbar-h) 
 .hero-row small { display: block; opacity: .85; font-size: 12px; }
 .hero-row b { font-size: 16px; }
 
-.bar-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; margin-bottom: 12px; font-size: 14px; }
-.bar-row:last-child { margin-bottom: 0; }
-.bar { grid-column: 1 / -1; height: 8px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
-.bar > i { display: block; height: 100%; border-radius: 99px; background: var(--accent); }
 
 .list { list-style: none; margin: 0; padding: 0; }
 .item { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
 .item:last-child { border-bottom: 0; }
 .item.tap { cursor: pointer; }
 .dot { width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center; flex: none; background: var(--surface-2); font-size: 18px; }
+.dot[style*="--c"] { background: color-mix(in srgb, var(--c) 20%, var(--surface)); }
 .item .grow { flex: 1; min-width: 0; }
 .item .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .sub { font-size: 12.5px; color: var(--muted); }
@@ -210,3 +214,17 @@ html, body { overflow-x: clip; overscroll-behavior-x: none; max-width: 100%; }
   max-width: calc(100% - 32px); box-shadow: var(--shadow);
 }
 
+
+/* ---------- Rosca de categorias ---------- */
+.donut { position: relative; width: min(240px, 72%); margin: 4px auto 18px; }
+.donut svg { display: block; width: 100%; height: auto; overflow: visible; }
+.donut .seg { fill: none; }
+.seg-lbl { font-size: 11px; font-weight: 800; fill: #fff; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.seg-lbl.ink-dark { fill: #1a1a1a; }
+.donut-center { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 2px; }
+.donut-center small { color: var(--muted); font-size: 12px; font-weight: 600; }
+.donut-center b { font-size: 22px; font-weight: 800; letter-spacing: -.3px; }
+.cat-list { display: grid; gap: 14px; }
+.cat-top { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; margin-bottom: 6px; }
+.cat-bar { height: 8px; border-radius: 99px; background: color-mix(in srgb, var(--c) 18%, var(--surface-2)); overflow: hidden; }
+.cat-bar > i { display: block; height: 100%; border-radius: 99px; background: var(--c); }

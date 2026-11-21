@@ -11,6 +11,10 @@
     ['Saúde', '💊'], ['Lazer', '🎉'], ['Compras', '🛍️'], ['Assinaturas', '📺'], ['Outros', '📦'],
   ];
   const CAT_ICON = Object.fromEntries(CATEGORIES);
+  // Cada categoria tem a sua cor fixa (CSS --cat-0..9, na ordem de CATEGORIES); desconhecida = "Outros"
+  const catIdx = (c) => { const i = CATEGORIES.findIndex(([n]) => n === c); return i < 0 ? CATEGORIES.length - 1 : i; };
+  const catColor = (c) => `var(--cat-${catIdx(c)})`;
+  const CAT_DARK_INK = new Set([1, 4, 6, 9]); // cores claras: % escrito em tinta escura
   const COLORS = ['#8a05be', '#ff7a00', '#0b6bcb', '#16a36a', '#d64545', '#111827', '#c2185b', '#00897b'];
 
   // ---------- Estado ----------
@@ -341,8 +345,7 @@
 
     const byCat = {};
     list.forEach((e) => { byCat[e.exp.category] = (byCat[e.exp.category] || 0) + e.mine; });
-    const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
-    const maxCat = cats[0][1] || 1;
+    const cats = Object.entries(byCat).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
 
     const byPay = {};
     list.forEach((e) => { const k = e.card ? e.card.name : 'Pix / boleto / dinheiro'; byPay[k] = (byPay[k] || 0) + e.mine; });
@@ -358,9 +361,14 @@
       </section>
       <section class="card">
         <h2>Categorias</h2>
-        ${cats.map(([c, v]) => `
-          <div class="bar-row"><span>${CAT_ICON[c] || '📦'} ${esc(c)}</span><b class="num">${brl(v)}</b>
-            <div class="bar"><i style="width:${Math.max(3, (v / maxCat) * 100)}%"></i></div></div>`).join('')}
+        ${donut(cats, mine)}
+        <div class="cat-list">
+          ${cats.map(([c, v]) => `
+            <div class="cat-row">
+              <div class="cat-top"><span><span class="muted">${pct(v, mine)}%</span> ${CAT_ICON[c] || '📦'} ${esc(c)}</span><b class="num">${brl(v)}</b></div>
+              <div class="cat-bar" style="--c:${catColor(c)}"><i style="width:${Math.max(2, (v / cats[0][1]) * 100)}%"></i></div>
+            </div>`).join('')}
+        </div>
       </section>
       <section class="card">
         <h2>Por forma de pagamento</h2>
@@ -371,13 +379,39 @@
       </section>`;
   }
 
+  const pct = (v, total) => (total > 0 ? Math.round((v / total) * 100) : 0);
+
+  // Rosca por categoria: fatias com um pequeno espaço entre elas, % em cada fatia e o total no meio
+  function donut(cats, total) {
+    if (!(total > 0)) return '';
+    const R = 80, W = 28, C = 2 * Math.PI * R, GAP = cats.length > 1 ? 3 : 0;
+    let off = 0;
+    const segs = cats.map(([c, v]) => {
+      const len = (v / total) * C, i = catIdx(c);
+      const mid = ((off + len / 2) / C) * 2 * Math.PI - Math.PI / 2;
+      const p = pct(v, total);
+      const seg = `
+        <circle class="seg" cx="100" cy="100" r="${R}" stroke-width="${W}" style="stroke:var(--cat-${i})"
+          stroke-dasharray="${Math.max(0.5, len - GAP).toFixed(2)} ${C.toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
+          transform="rotate(-90 100 100)"><title>${esc(c)}: ${brl(v)} (${p}%)</title></circle>
+        ${p >= 6 ? `<text x="${(100 + R * Math.cos(mid)).toFixed(1)}" y="${(100 + R * Math.sin(mid)).toFixed(1)}" class="seg-lbl${CAT_DARK_INK.has(i) ? ' ink-dark' : ''}">${p}%</text>` : ''}`;
+      off += len;
+      return seg;
+    }).join('');
+    return `
+      <div class="donut" role="img" aria-label="Gastos por categoria: ${cats.map(([c, v]) => `${esc(c)} ${pct(v, total)}%`).join(', ')}">
+        <svg viewBox="0 0 200 200">${segs}</svg>
+        <div class="donut-center"><small>Total</small><b class="num">${brl(total)}</b></div>
+      </div>`;
+  }
+
   function entryRow(e) {
     const where = e.card ? esc(e.card.name) : 'Pix/boleto';
     const lbl = instLabel(e);
     const inst = lbl ? ` · ${e.exp.recurring ? '🔁 ' : ''}${lbl}` : '';
     return `
       <li class="item tap" data-exp="${e.exp.id}">
-        <div class="dot">${CAT_ICON[e.exp.category] || '📦'}</div>
+        <div class="dot" style="--c:${catColor(e.exp.category)}">${CAT_ICON[e.exp.category] || '📦'}</div>
         <div class="grow">
           <div class="title">${esc(e.exp.description)}</div>
           <div class="sub">${where}${inst} · ${e.exp.recurring ? 'dia ' + parseDate(e.exp.purchase_date).d : fmtDate(e.exp.purchase_date)}</div>
