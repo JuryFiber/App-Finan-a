@@ -1,5 +1,5 @@
 // Service worker: deixa o app abrir rápido e instalável. Dados sempre vêm do Supabase (não são cacheados).
-const CACHE = 'financas-v23';
+const CACHE = 'financas-v24';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './config.js', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './termos.html', './privacidade.html', './legal.css'];
 
 self.addEventListener('install', (e) => {

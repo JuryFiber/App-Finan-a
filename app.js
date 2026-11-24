@@ -567,7 +567,7 @@
     const theme = getTheme();
     const row = (inner, icon, label, cls = '') =>
       `${inner}<span class="mi">${svgIcon(icon)}</span><span class="grow">${label}</span><span class="chev" aria-hidden="true">›</span>`;
-    const link = (href, icon, label) => `<a class="menu-row" href="${href}" target="_blank" rel="noopener">${row('', icon, label)}</a>`;
+    const link = (href, icon, label) => `<a class="menu-row" href="${href}">${row('', icon, label)}</a>`;
     const btn = (id, icon, label, cls = '') => `<button class="menu-row ${cls}" id="${id}">${row('', icon, label)}</button>`;
     return `
       <section class="card">
@@ -852,6 +852,40 @@
     document.body.style.overflow = '';
   }
   $('#sheet-backdrop').onclick = () => closeSheet();
+
+  // Termos e Política abrem numa folha dentro do app (assim a seta "voltar" do
+  // celular fecha a folha em vez de sair do app). Vale para qualquer link a eles.
+  async function openLegal(href) {
+    const [file, hash] = href.split('#');
+    openSheet('<p class="muted" style="text-align:center;padding:24px 0">Carregando…</p>');
+    let html = '';
+    try {
+      const res = await fetch(file);
+      if (!res.ok) throw new Error(res.status);
+      const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+      const title = doc.querySelector('h1')?.textContent || '';
+      const updated = doc.querySelector('.updated')?.textContent || '';
+      const body = doc.querySelector('article')?.innerHTML || '';
+      html = `<div class="legal-sheet"><h3>${esc(title)}</h3><p class="muted legal-upd">${esc(updated)}</p>${body}
+        <div class="sheet-actions"><button class="btn" type="button" id="legal-close">Fechar</button></div></div>`;
+    } catch {
+      html = '<p class="msg error">Não foi possível abrir agora. Verifique a internet e tente de novo.</p>';
+    }
+    if ($('#sheet').hidden) return; // fechou enquanto carregava
+    $('#sheet').innerHTML = `<div class="grip"></div>${html}`;
+    $('#sheet').scrollTop = 0;
+    const close = $('#legal-close');
+    if (close) close.onclick = () => closeSheet();
+    if (hash) $('#sheet').querySelector('#' + CSS.escape(hash))?.scrollIntoView();
+  }
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href]');
+    if (!a) return;
+    const href = a.getAttribute('href');
+    if (!/^(termos|privacidade)\.html(#[\w-]+)?$/.test(href)) return;
+    e.preventDefault();
+    openLegal(href);
+  });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#sheet').hidden) closeSheet(); });
 
   function chipGroup(name, options, current) {
