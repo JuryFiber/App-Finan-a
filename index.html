@@ -19,13 +19,14 @@
     <div class="auth-box">
       <img src="icon.svg" alt="" class="auth-logo">
       <h1>Minhas Finanças</h1>
-      <p class="muted">Gastos, faturas e divisão de contas.</p>
+      <p class="muted">Gastos e faturas de cartão.</p>
       <form id="auth-form">
         <label>E-mail<input type="email" name="email" required autocomplete="email"></label>
         <label>Senha<input type="password" name="password" required minlength="6" autocomplete="current-password"></label>
         <button type="submit" class="btn primary" id="auth-submit">Entrar</button>
         <button type="button" class="btn link" id="auth-toggle">Não tem conta? Criar conta</button>
         <p id="auth-msg" class="msg" role="status"></p>
+        <p class="legal-note">Ao usar o app você concorda com os <a href="termos.html" target="_blank" rel="noopener">Termos de uso</a> e a <a href="privacidade.html" target="_blank" rel="noopener">Política de privacidade</a>.</p>
       </form>
     </div>
   </section>
@@ -34,7 +35,10 @@
   <div id="app" hidden>
     <header class="topbar">
       <button class="icon-btn" id="prev-month" aria-label="Mês anterior">‹</button>
-      <div class="month-title" id="month-title"></div>
+      <div class="tb-mid">
+        <div class="month-title" id="month-title"></div>
+        <button class="profile-pill" id="profile-pill" hidden></button>
+      </div>
       <button class="icon-btn" id="next-month" aria-label="Próximo mês">›</button>
     </header>
 
@@ -45,7 +49,7 @@
       <button data-tab="gastos"><span class="ti"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 17.5v-11"/></svg></span>Gastos</button>
       <button class="fab" id="fab" aria-label="Novo gasto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
       <button data-tab="cartoes"><span class="ti"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="14" x="2" y="5" rx="2"/><path d="M2 10h20"/></svg></span>Cartões</button>
-      <button data-tab="perfil"><span class="avatar avatar-tab" id="tab-avatar"></span>Perfil</button>
+      <button data-tab="menu"><span class="ti"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></span>Menu</button>
     </nav>
   </div>
 

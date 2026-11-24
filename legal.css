@@ -1,0 +1,25 @@
+/* Páginas de Termos de uso e Política de privacidade */
+:root {
+  color-scheme: light dark;
+  --bg: #f4f5f7; --surface: #ffffff; --text: #15171c; --muted: #636a76; --border: #e3e5ea; --accent: #0f8f5f;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0f1115; --surface: #171a21; --text: #eceef2; --muted: #9aa1ad; --border: #262a33; --accent: #2bd38f; }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15.5px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+main { max-width: 720px; margin: 0 auto; padding: 24px 16px 56px; }
+.back { display: inline-block; margin-bottom: 14px; color: var(--accent); font-weight: 600; text-decoration: none; }
+h1 { font-size: 26px; line-height: 1.25; margin: 0 0 4px; letter-spacing: -.3px; }
+.updated { color: var(--muted); font-size: 13.5px; margin: 0 0 22px; }
+article { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 4px 20px 16px; }
+h2 { font-size: 17px; margin: 22px 0 6px; }
+p, li { color: var(--text); }
+ul { padding-left: 20px; }
+li { margin: 4px 0; }
+a { color: var(--accent); }
+.note { color: var(--muted); font-size: 13.5px; }

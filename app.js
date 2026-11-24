@@ -26,6 +26,9 @@
     loadedAt: 0,       // quando os dados foram carregados pela última vez (0 = ainda não)
     loadError: false,  // o primeiro carregamento falhou (mostra "Tentar de novo")
     avatarUrl: null,
+    profiles: [],      // perfis extras (família, empresa); o principal não tem linha (profile_id vazio)
+    profileId: null,   // perfil ativo (null = principal)
+    profilesOk: false, // a tabela de perfis existe no banco (se não, o app funciona como antes, sem perfis)
     tab: 'resumo',
     month: now.getFullYear() * 12 + now.getMonth(), // índice absoluto do mês
   };
@@ -155,7 +158,7 @@
     const PAGE = 1000;
     const all = [];
     for (let from = 0; ; from += PAGE) {
-      const { data, error } = await sb.from('expenses').select('*')
+      const { data, error } = await scoped(sb.from('expenses').select('*'))
         .order('purchase_date', { ascending: false }).order('id') // 'id' desempata: páginas sem repetir nem pular linhas
         .range(from, from + PAGE - 1);
       if (error) throw error;
@@ -170,7 +173,9 @@
   async function loadData() {
     const seq = ++loadSeq;
     try {
-      const [c, expenses] = await Promise.all([sb.from('cards').select('*').order('created_at'), fetchAllExpenses()]);
+      await loadProfiles();
+      if (seq !== loadSeq) return;
+      const [c, expenses] = await Promise.all([scoped(sb.from('cards').select('*')).order('created_at'), fetchAllExpenses()]);
       if (c.error) throw c.error;
       if (seq !== loadSeq) return;
       Object.assign(state, { cards: c.data, expenses, loadedAt: Date.now(), loadError: false });
@@ -180,6 +185,35 @@
       toast('Erro ao carregar dados: ' + err.message);
     }
     render();
+  }
+
+  // ---------- Perfis ----------
+  // Cada perfil tem os seus cartões e gastos. Só os dados do perfil ativo são carregados.
+  const profileKey = () => `profile:${state.session?.user?.id}`;
+  const activeProfile = () => state.profiles.find((p) => p.id === state.profileId) || null;
+  const profileName = (p) => (p ? p.name : 'Principal');
+  // Filtra a consulta pelo perfil ativo (sem a tabela de perfis no banco, não filtra nada)
+  const scoped = (q) => (!state.profilesOk ? q : state.profileId ? q.eq('profile_id', state.profileId) : q.is('profile_id', null));
+  // Linha nova ganha o perfil ativo
+  const withProfile = (row) => (state.profilesOk ? { ...row, profile_id: state.profileId } : row);
+
+  async function loadProfiles() {
+    const { data, error } = await sb.from('profiles').select('*').order('created_at');
+    state.profilesOk = !error;
+    state.profiles = error ? [] : data;
+    if (state.profileId === null) { try { state.profileId = localStorage.getItem(profileKey()) || null; } catch {} }
+    if (state.profileId && !state.profiles.some((p) => p.id === state.profileId)) state.profileId = null; // perfil apagado
+  }
+
+  function switchProfile(id) {
+    if (id === state.profileId) return;
+    state.profileId = id;
+    try { id ? localStorage.setItem(profileKey(), id) : localStorage.removeItem(profileKey()); } catch {}
+    loadSeq++; // descarta carregamento do perfil anterior
+    Object.assign(state, { cards: [], expenses: [], loadedAt: 0, loadError: false });
+    if (state.tab === 'resumo') render(); else setTab('resumo');
+    loadData();
+    toast(`Perfil: ${profileName(activeProfile())}`);
   }
 
   // Ao voltar para o app: recarrega se o carregamento falhou ou se os dados têm mais de 5 min
@@ -243,14 +277,14 @@
     if (session && !had) showApp();
     if (!session) {
       loadSeq++; // descarta carregamentos em andamento
-      Object.assign(state, { cards: [], expenses: [], avatarUrl: null, loadedAt: 0, loadError: false });
+      Object.assign(state, { cards: [], expenses: [], profiles: [], profileId: null, profilesOk: false, avatarUrl: null, loadedAt: 0, loadError: false });
       if (state.tab !== 'resumo') setTab('resumo'); // próxima entrada começa no Resumo
       showAuth();
     }
   });
 
   // ---------- Navegação ----------
-  const isMonthlyTab = () => !['cartoes', 'perfil'].includes(state.tab); // abas com ‹ mês ›
+  const isMonthlyTab = () => !['cartoes', 'menu'].includes(state.tab); // abas com ‹ mês ›
 
   // ---------- Botão "voltar" do celular ----------
   // Histórico: [base] → [outra aba] → [formulário aberto]. Voltar fecha o formulário, depois volta ao Resumo,
@@ -312,19 +346,24 @@
       changeMonth(dx < 0 ? 1 : -1);
     }, { passive: true });
   })();
+  $('#profile-pill').onclick = openProfilePicker;
   $('#fab').onclick = () => (state.tab === 'cartoes' ? openCardForm() : openExpenseForm());
 
   // ---------- Render ----------
   function render() {
     const monthly = isMonthlyTab();
-    const waiting = !state.loadedAt && state.tab !== 'perfil'; // dados ainda não chegaram (ou falharam)
-    $('#month-title').textContent = monthly ? monthName(state.month) : (state.tab === 'perfil' ? 'Perfil' : 'Cartões');
+    const waiting = !state.loadedAt && state.tab !== 'menu'; // dados ainda não chegaram (ou falharam)
+    $('#month-title').textContent = monthly ? monthName(state.month) : (state.tab === 'menu' ? 'Menu' : 'Cartões');
+    // Com mais de um perfil, mostra qual está ativo (toque para trocar)
+    const pill = $('#profile-pill');
+    pill.hidden = !state.profiles.length || state.tab === 'menu';
+    if (!pill.hidden) pill.innerHTML = `${profileIcon(activeProfile())} ${esc(profileName(activeProfile()))} <span aria-hidden="true">▾</span>`;
     $('#prev-month').style.visibility = monthly ? 'visible' : 'hidden';
     $('#next-month').style.visibility = monthly ? 'visible' : 'hidden';
-    $('#fab').hidden = state.tab === 'perfil' || waiting;
+    $('#fab').hidden = state.tab === 'menu' || waiting;
     $('.tabbar').classList.toggle('no-fab', $('#fab').hidden); // sem o "+", os 4 ícones se espalham por igual
     $('#fab').setAttribute('aria-label', state.tab === 'cartoes' ? 'Novo cartão' : 'Novo gasto');
-    const views = { resumo: renderResumo, gastos: renderGastos, cartoes: renderCartoes, perfil: renderPerfil };
+    const views = { resumo: renderResumo, gastos: renderGastos, cartoes: renderCartoes, menu: renderMenu };
     $('#view').innerHTML = waiting ? renderWaiting() : views[state.tab]();
     paintAvatars();
     bindView();
@@ -492,10 +531,44 @@
     return `<div class="empty"><b>${esc(title)}</b>${esc(sub)}${extraHtml}</div>`;
   }
 
-  // ---------- Perfil ----------
-  function renderPerfil() {
+  // ---------- Menu ----------
+  const ICON = {
+    lock: '<path d="M7 11V7a5 5 0 0 1 10 0v4"/><rect x="4" y="11" width="16" height="10" rx="2"/>',
+    doc: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',
+    shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+    out: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+    trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>',
+  };
+  const svgIcon = (k) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[k]}</svg>`;
+  const profileIcon = (p) => (p ? (p.kind === 'empresa' ? '🏢' : '👤') : '⭐');
+  const KIND_LABEL = { pessoa: 'Pessoa', empresa: 'Empresa' };
+
+  function profileRows() {
+    return [null, ...state.profiles].map((p) => {
+      const id = p ? p.id : '';
+      const on = (p ? p.id : null) === state.profileId;
+      const av = p
+        ? `<span class="avatar prof-av" style="background:${esc(p.color)};color:#fff">${esc(p.name[0].toUpperCase())}</span>`
+        : '<span class="avatar prof-av" id="mini-avatar"></span>';
+      return `<li class="prof-item${on ? ' on' : ''}">
+          <button class="prof-pick" data-prof="${esc(id)}" aria-pressed="${on}">
+            ${av}
+            <span class="grow"><span class="title">${esc(profileName(p))}</span>
+              <span class="sub">${p ? `${profileIcon(p)} ${KIND_LABEL[p.kind] || 'Pessoa'}` : '⭐ Dono da conta'}</span></span>
+            ${on ? '<span class="prof-check" aria-label="ativo">✓</span>' : ''}
+          </button>
+          ${p ? `<button class="icon-btn prof-edit" data-prof-edit="${esc(id)}" aria-label="Editar ${esc(p.name)}">✎</button>` : ''}
+        </li>`;
+    }).join('');
+  }
+
+  function renderMenu() {
     const email = state.session?.user?.email || '';
     const theme = getTheme();
+    const row = (inner, icon, label, cls = '') =>
+      `${inner}<span class="mi">${svgIcon(icon)}</span><span class="grow">${label}</span><span class="chev" aria-hidden="true">›</span>`;
+    const link = (href, icon, label) => `<a class="menu-row" href="${href}" target="_blank" rel="noopener">${row('', icon, label)}</a>`;
+    const btn = (id, icon, label, cls = '') => `<button class="menu-row ${cls}" id="${id}">${row('', icon, label)}</button>`;
     return `
       <section class="card">
         <div class="profile-head">
@@ -511,6 +584,15 @@
       </section>
 
       <section class="card">
+        <h2>Perfis</h2>
+        ${state.profilesOk ? `
+          <ul class="list prof-list">${profileRows()}</ul>
+          <button class="btn small" id="prof-add" style="margin-top:10px">+ Novo perfil</button>
+          <p class="muted" style="font-size:12.5px;margin:10px 2px 0">Cada perfil tem os seus próprios cartões e gastos. Use para alguém da família ou para a sua empresa.</p>`
+        : '<p class="muted" style="font-size:13.5px;margin:0">Perfis indisponíveis no momento.</p>'}
+      </section>
+
+      <section class="card">
         <h2>Tema do app</h2>
         <div class="seg" id="theme-seg">
           ${[['system', 'Automático'], ['light', '☀️ Claro'], ['dark', '🌙 Escuro']].map(([v, l]) =>
@@ -519,17 +601,132 @@
         <p class="muted" style="font-size:12.5px;margin:8px 2px 0">Automático segue o tema do seu celular.</p>
       </section>
 
-      <section class="card">
-        <h2>Alterar senha</h2>
-        <form id="pwd-form" novalidate>
-          <label>Nova senha<input type="password" name="p1" minlength="6" autocomplete="new-password" required></label>
-          <label>Repita a nova senha<input type="password" name="p2" minlength="6" autocomplete="new-password" required></label>
-          <p class="msg" id="pwd-msg" style="text-align:left"></p>
-          <button class="btn primary" type="submit">Salvar nova senha</button>
-        </form>
+      <section class="card menu-list">
+        ${btn('open-pwd', 'lock', 'Alterar senha')}
+        ${link('termos.html', 'doc', 'Termos de uso')}
+        ${link('privacidade.html', 'shield', 'Política de privacidade')}
       </section>
 
-      <button class="btn danger" id="logout" style="width:100%">Sair da conta</button>`;
+      <section class="card menu-list">
+        ${btn('logout', 'out', 'Sair da conta')}
+        ${btn('delete-account', 'trash', 'Excluir minha conta', 'danger')}
+      </section>`;
+  }
+
+  // Lista de perfis em folha (aberta pelo seletor no topo)
+  function openProfilePicker() {
+    openSheet(`<h3>Trocar de perfil</h3><ul class="list prof-list">${profileRows()}</ul>`);
+    paintAvatars();
+    bindProfileRows($('#sheet'));
+  }
+
+  function bindProfileRows(root) {
+    root.querySelectorAll('[data-prof]').forEach((b) => {
+      b.onclick = () => { if (!$('#sheet').hidden) closeSheet(); switchProfile(b.dataset.prof || null); };
+    });
+    root.querySelectorAll('[data-prof-edit]').forEach((b) => {
+      b.onclick = () => openProfileForm(state.profiles.find((p) => p.id === b.dataset.profEdit));
+    });
+  }
+
+  function openProfileForm(prof) {
+    const p = prof || { name: '', kind: 'pessoa', color: COLORS[(state.profiles.length + 2) % COLORS.length] };
+    let color = p.color;
+    openSheet(`
+      <h3>${prof ? 'Editar perfil' : 'Novo perfil'}</h3>
+      <form id="prof-form" novalidate>
+        <label>Nome<input name="name" maxlength="30" value="${esc(p.name)}" placeholder="Ex.: Maria, Minha empresa" required></label>
+        <div><label style="margin-bottom:6px">Tipo</label>${chipGroup('kind', [['pessoa', '👤 Pessoa'], ['empresa', '🏢 Empresa']], p.kind)}</div>
+        <div><label style="margin-bottom:6px">Cor</label>
+          <div class="color-row">${COLORS.map((c) =>
+            `<button type="button" data-color="${c}" class="${c === color ? 'on' : ''}" style="background:${c}" aria-label="Cor ${c}"></button>`).join('')}</div></div>
+        <p class="msg error" id="prof-msg"></p>
+        <div class="sheet-actions">
+          <button class="btn primary" type="submit">${prof ? 'Salvar' : 'Criar perfil'}</button>
+          ${prof ? '<button class="btn danger" type="button" id="prof-del">Apagar perfil</button>' : ''}
+        </div>
+      </form>`);
+    const form = $('#prof-form');
+    bindChips(form);
+    form.querySelectorAll('[data-color]').forEach((b) => {
+      b.onclick = () => { color = b.dataset.color; form.querySelectorAll('[data-color]').forEach((x) => x.classList.toggle('on', x === b)); };
+    });
+    if (!prof) setTimeout(() => form.name.focus(), 50);
+
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const row = { name: form.name.value.trim(), kind: chipVal(form, 'kind'), color };
+      const msg = $('#prof-msg');
+      if (!row.name) { msg.textContent = 'Informe o nome do perfil.'; return; }
+      const btn = form.querySelector('[type=submit]');
+      btn.disabled = true; // evita criar o mesmo perfil duas vezes com toque duplo
+      const res = prof
+        ? await sb.from('profiles').update(row).eq('id', prof.id).select().single()
+        : await sb.from('profiles').insert(row).select().single();
+      btn.disabled = false;
+      if (res.error) { msg.textContent = 'Erro ao salvar: ' + res.error.message; return; }
+      if (prof) state.profiles = state.profiles.map((x) => (x.id === prof.id ? res.data : x));
+      else state.profiles.push(res.data);
+      closeSheet();
+      render();
+      toast(prof ? 'Perfil atualizado' : `Perfil "${res.data.name}" criado. Toque nele para usar.`);
+    };
+
+    const del = $('#prof-del');
+    if (del) del.onclick = async () => {
+      if (!confirm(`Apagar o perfil "${prof.name}" com TODOS os cartões e gastos dele? Não dá para desfazer.`)) return;
+      del.disabled = true;
+      const { error } = await sb.from('profiles').delete().eq('id', prof.id);
+      del.disabled = false;
+      if (error) { toast('Erro ao apagar: ' + error.message); return; }
+      state.profiles = state.profiles.filter((x) => x.id !== prof.id);
+      closeSheet();
+      if (state.profileId === prof.id) switchProfile(null);
+      else { render(); toast('Perfil apagado'); }
+    };
+  }
+
+  function openPasswordForm() {
+    openSheet(`
+      <h3>Alterar senha</h3>
+      <form id="pwd-form" novalidate>
+        <label>Nova senha<input type="password" name="p1" minlength="6" autocomplete="new-password" required></label>
+        <label>Repita a nova senha<input type="password" name="p2" minlength="6" autocomplete="new-password" required></label>
+        <p class="msg error" id="pwd-msg"></p>
+        <div class="sheet-actions"><button class="btn primary" type="submit">Salvar nova senha</button></div>
+      </form>`);
+    const f = $('#pwd-form');
+    setTimeout(() => f.p1.focus(), 50);
+    f.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const msg = $('#pwd-msg');
+      if (f.p1.value.length < 6) { msg.textContent = 'A senha precisa ter pelo menos 6 caracteres.'; return; }
+      if (f.p1.value !== f.p2.value) { msg.textContent = 'As senhas não são iguais.'; return; }
+      const btn = f.querySelector('[type=submit]');
+      btn.disabled = true;
+      const { error } = await sb.auth.updateUser({ password: f.p1.value });
+      btn.disabled = false;
+      if (error) {
+        msg.textContent = /different from the old/i.test(error.message) ? 'A nova senha precisa ser diferente da atual.' : 'Erro: ' + error.message;
+        return;
+      }
+      closeSheet();
+      toast('Senha alterada com sucesso');
+    };
+  }
+
+  // Excluir a conta (exigência da Play Store): apaga a foto e depois o usuário;
+  // o banco apaga perfis, cartões e gastos junto (ON DELETE CASCADE)
+  async function deleteAccount() {
+    if (!confirm('Excluir sua conta? Todos os perfis, cartões e gastos serão apagados para sempre.')) return;
+    const typed = prompt('Para confirmar, digite EXCLUIR');
+    if ((typed || '').trim().toUpperCase() !== 'EXCLUIR') { toast('Exclusão cancelada'); return; }
+    try { await sb.storage.from('avatars').remove([avatarPath()]); } catch {}
+    const { error } = await sb.rpc('delete_my_account');
+    if (error) { toast('Erro ao excluir: ' + error.message); return; }
+    try { localStorage.removeItem(profileKey()); } catch {}
+    try { await sb.auth.signOut(); } catch {}
+    toast('Conta excluída');
   }
 
   // Tema: 'system' | 'light' | 'dark' (preferência deste aparelho)
@@ -551,12 +748,12 @@
     const { data, error } = await sb.storage.from('avatars').createSignedUrl(avatarPath(), 60 * 60 * 24 * 7);
     state.avatarUrl = error ? null : data.signedUrl;
     paintAvatars();
-    if (state.tab === 'perfil') render();
+    if (state.tab === 'menu') render();
   }
 
   function paintAvatars() {
     const initial = (state.session?.user?.email || '?')[0].toUpperCase();
-    document.querySelectorAll('#tab-avatar, #big-avatar').forEach((el) => {
+    document.querySelectorAll('#big-avatar, #mini-avatar').forEach((el) => {
       if (state.avatarUrl) { el.style.backgroundImage = `url("${state.avatarUrl}")`; el.textContent = ''; }
       else { el.style.backgroundImage = ''; el.textContent = initial; }
     });
@@ -604,7 +801,7 @@
     toast('Foto removida');
   }
 
-  function bindPerfil() {
+  function bindMenu() {
     const pick = $('#avatar-pick');
     if (!pick) return;
     const file = $('#avatar-file');
@@ -619,26 +816,10 @@
       };
     });
 
-    $('#pwd-form').onsubmit = async (ev) => {
-      ev.preventDefault();
-      const f = ev.target;
-      const msg = $('#pwd-msg');
-      msg.className = 'msg error';
-      if (f.p1.value.length < 6) { msg.textContent = 'A senha precisa ter pelo menos 6 caracteres.'; return; }
-      if (f.p1.value !== f.p2.value) { msg.textContent = 'As senhas não são iguais.'; return; }
-      const btn = f.querySelector('[type=submit]');
-      btn.disabled = true;
-      const { error } = await sb.auth.updateUser({ password: f.p1.value });
-      btn.disabled = false;
-      if (error) {
-        msg.textContent = /different from the old/i.test(error.message) ? 'A nova senha precisa ser diferente da atual.' : 'Erro: ' + error.message;
-        return;
-      }
-      f.reset();
-      msg.className = 'msg';
-      msg.textContent = '';
-      toast('Senha alterada com sucesso');
-    };
+    bindProfileRows($('#view'));
+    const add = $('#prof-add'); if (add) add.onclick = () => openProfileForm();
+    $('#open-pwd').onclick = openPasswordForm;
+    $('#delete-account').onclick = deleteAccount;
   }
 
   function bindView() {
@@ -651,7 +832,7 @@
     const ex = $('#export'); if (ex) ex.onclick = exportExcel;
     const rt = $('#retry'); if (rt) rt.onclick = () => { state.loadError = false; render(); loadData(); };
     const lo = $('#logout'); if (lo) lo.onclick = () => { if (confirm('Sair da conta?')) sb.auth.signOut(); };
-    bindPerfil();
+    bindMenu();
   }
 
   // ---------- Folha inferior ----------
@@ -783,7 +964,7 @@
       const msg = $('#exp-msg');
       const res = exp
         ? await sb.from('expenses').update(row).eq('id', exp.id).select().single()
-        : await sb.from('expenses').insert(row).select().single();
+        : await sb.from('expenses').insert(withProfile(row)).select().single();
       if (res.error) { msg.textContent = 'Erro ao salvar: ' + res.error.message; return false; }
       if (exp) state.expenses = state.expenses.map((x) => (x.id === exp.id ? res.data : x));
       else state.expenses.unshift(res.data);
@@ -869,7 +1050,7 @@
       btn.disabled = true; // evita cadastrar o mesmo cartão duas vezes com toque duplo
       const res = card
         ? await sb.from('cards').update(row).eq('id', card.id).select().single()
-        : await sb.from('cards').insert(row).select().single();
+        : await sb.from('cards').insert(withProfile(row)).select().single();
       btn.disabled = false;
       if (res.error) { msg.textContent = 'Erro ao salvar: ' + res.error.message; return; }
       if (card) state.cards = state.cards.map((x) => (x.id === card.id ? res.data : x));
