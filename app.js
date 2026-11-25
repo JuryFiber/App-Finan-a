@@ -554,7 +554,7 @@
           <button class="prof-pick" data-prof="${esc(id)}" aria-pressed="${on}">
             ${av}
             <span class="grow"><span class="title">${esc(profileName(p))}</span>
-              <span class="sub">${p ? `${profileIcon(p)} ${KIND_LABEL[p.kind] || 'Pessoa'}` : '⭐ Dono da conta'}</span></span>
+              <span class="sub">${p ? `${profileIcon(p)} ${KIND_LABEL[p.kind] || 'Pessoa'}` : '⭐ Perfil principal'}</span></span>
             ${on ? '<span class="prof-check" aria-label="ativo">✓</span>' : ''}
           </button>
           ${p ? `<button class="icon-btn prof-edit" data-prof-edit="${esc(id)}" aria-label="Editar ${esc(p.name)}">✎</button>` : ''}
