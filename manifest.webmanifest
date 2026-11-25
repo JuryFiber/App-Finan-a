@@ -3,6 +3,7 @@
   "short_name": "Finanças",
   "description": "Controle de gastos e faturas de cartão.",
   "lang": "pt-BR",
+  "id": "./",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

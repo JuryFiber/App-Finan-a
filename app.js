@@ -10,11 +10,16 @@
     ['Mercado', '🛒'], ['Alimentação', '🍔'], ['Transporte', '🚗'], ['Casa', '🏠'], ['Contas', '💡'],
     ['Saúde', '💊'], ['Lazer', '🎉'], ['Compras', '🛍️'], ['Assinaturas', '📺'], ['Outros', '📦'],
   ];
-  const CAT_ICON = Object.fromEntries(CATEGORIES);
+  const CAT_ICON = Object.assign(Object.create(null), Object.fromEntries(CATEGORIES)); // sem protótipo: "constructor" não vira ícone
   // Cada categoria tem a sua cor fixa (CSS --cat-0..9, na ordem de CATEGORIES); desconhecida = "Outros"
   const catIdx = (c) => { const i = CATEGORIES.findIndex(([n]) => n === c); return i < 0 ? CATEGORIES.length - 1 : i; };
   const catColor = (c) => `var(--cat-${catIdx(c)})`;
-  const CAT_DARK_INK = new Set([1, 4, 6, 9]); // cores claras: % escrito em tinta escura
+  const CAT_DARK_INK = new Set([1, 4, 6, 9]); // cores claras: % escrito em tinta escura (tema claro)
+  const CAT_DARK_INK_DARK = new Set([1, 3, 4, 5, 6, 7, 8, 9]); // no tema escuro as cores mudam
+  const isDarkTheme = () => {
+    const t = document.documentElement.dataset.theme;
+    return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  };
   const COLORS = ['#8a05be', '#ff7a00', '#0b6bcb', '#16a36a', '#d64545', '#111827', '#c2185b', '#00897b'];
 
   // ---------- Estado ----------
@@ -42,6 +47,8 @@
   // ---------- Utilidades ----------
   const $ = (s, el = document) => el.querySelector(s);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  // Cor vinda do banco só entra em style="..." se for #rrggbb (impede injetar CSS)
+  const safeColor = (c) => (/^#[0-9a-f]{6}$/i.test(String(c)) ? c : '#8a8f98');
   const brl = (v) => (v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
   const round2 = (v) => Math.round(v * 100) / 100;
   const pad2 = (n) => String(n).padStart(2, '0');
@@ -53,13 +60,17 @@
   const curIdx = () => { const t = new Date(); return t.getFullYear() * 12 + t.getMonth(); }; // mês de hoje
   const dateStr = (idx, d) => `${Math.floor(idx / 12)}-${pad2((idx % 12) + 1)}-${pad2(Math.min(d, daysIn(idx)))}`;
   const moneyInput = (v) => Number(v).toFixed(2).replace('.', ',');
+  const validMonths = (v) => { v = String(v).trim(); return !v || (/^\d+$/.test(v) && +v >= 1 && +v <= 600); };
   const shortMonth = (idx) => `${MONTHS[idx % 12].slice(0, 3)} ${Math.floor(idx / 12)}`;
 
   function parseMoney(s) {
-    s = String(s).trim().replace(/[R$\s]/g, '');
-    if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');      // 1.234,56 → 1234.56
-    else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');    // 1.500 → 1500 (ponto de milhar)
-    const v = parseFloat(s);
+    s = String(s).trim().replace(/^R\$/i, '').replace(/\s/g, '');
+    if (s.includes(',')) {                                              // 1.234,56 | 1234,5
+      if (!/^-?(\d{1,3}(\.\d{3})+|\d+),\d{1,2}$/.test(s)) return NaN;
+      s = s.replace(/\./g, '').replace(',', '.');
+    } else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, ''); // 1.500 → 1500 (ponto de milhar)
+    else if (!/^-?\d+(\.\d{1,2})?$/.test(s)) return NaN;               // 12abc, 1e3, 1,234.56 → inválido
+    const v = Number(s);
     return Number.isFinite(v) ? round2(v) : NaN;
   }
 
@@ -179,13 +190,23 @@
 
   // Receita mensal editada num mês depois do 1º: o valor novo vale daquele mês em diante (igual às contas fixas)
   function incomeForward(inc, row, idx) {
-    if (!inc.recurring || !row.recurring || row.income_date !== inc.income_date) return { ...row, recur_changes: [] };
-    if (idx <= incStart(inc)) return { ...row, recur_changes: inc.recur_changes || [] };
-    const key = monthKey(idx);
-    const changes = (inc.recur_changes || []).filter((c) => c.from !== key);
-    if (row.amount !== incAmountAt({ ...inc, recur_changes: changes }, idx)) changes.push({ from: key, amount: row.amount });
-    changes.sort((a, b) => a.from.localeCompare(b.from));
-    return { ...row, amount: Number(inc.amount), recur_changes: changes };
+    if (!inc.recurring || !row.recurring) return { ...row, recur_changes: [] };
+    const s0 = incStart(inc), key = monthKey(idx);
+    let base = Number(inc.amount);
+    let changes = (inc.recur_changes || []).map((c) => ({ ...c }));
+    if (idx > s0) { // valor novo vale do mês na tela em diante
+      changes = changes.filter((c) => c.from !== key);
+      if (row.amount !== incAmountAt({ amount: base, recur_changes: changes }, idx)) changes.push({ from: key, amount: row.amount });
+      changes.sort((a, b) => a.from.localeCompare(b.from));
+    } else base = row.amount; // no 1º mês: muda o valor inicial
+    // Data nova mais tarde: o valor inicial passa a ser o que já valia no novo 1º mês
+    const s1 = incStart(row);
+    if (s1 > s0) base = incAmountAt({ amount: base, recur_changes: changes }, s1);
+    // Guarda só as mudanças depois do 1º mês que realmente mudam o valor
+    let prev = base;
+    const out = [];
+    for (const c of changes) if (c.from > monthKey(s1) && Number(c.amount) !== prev) { out.push(c); prev = Number(c.amount); }
+    return { ...row, amount: base, recur_changes: out };
   }
 
   // Texto da parcela: "3/10", "3/60" (financiamento) ou "mensal" (sem fim)
@@ -206,9 +227,9 @@
     }
   }
 
-  // Tabelas extras (limites, receitas, metas): se falhar, o app segue sem elas
+  // Tabelas extras (limites, receitas, metas): se a leitura falhar devolve null e o app mantém o que já tinha
   const optional = (table, order = 'created_at') =>
-    scoped(sb.from(table).select('*')).order(order).then((r) => (r.error ? [] : r.data), () => []);
+    scoped(sb.from(table).select('*')).order(order).then((r) => (r.error ? null : r.data), () => null);
 
   // Cada carregamento ganha um número; a resposta é descartada se outro carregamento começou,
   // se um formulário foi aberto (para não sobrescrever o que for salvo nele) ou se saiu da conta.
@@ -224,7 +245,11 @@
       ]);
       if (c.error) throw c.error;
       if (seq !== loadSeq) return;
-      Object.assign(state, { cards: c.data, expenses, budgets, incomes, goals, loadedAt: Date.now(), loadError: false });
+      Object.assign(state, {
+        cards: c.data, expenses, budgets: budgets ?? state.budgets, incomes: incomes ?? state.incomes, goals: goals ?? state.goals,
+        loadedAt: Date.now(), loadError: false,
+      });
+      if ($('#toast').textContent.startsWith('Erro ao carregar')) $('#toast').hidden = true; // erro antigo do "Tentar de novo"
     } catch (err) {
       if (seq !== loadSeq || state.loadedAt) return; // falhou só a atualização: mantém o que já está na tela
       state.loadError = true;
@@ -265,8 +290,10 @@
   // Ao voltar para o app: recarrega se o carregamento falhou ou se os dados têm mais de 5 min
   // (ex.: gastos lançados em outro aparelho enquanto este ficou aberto)
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'visible' || !state.session || !$('#sheet').hidden) return;
+    if (document.visibilityState !== 'visible' || !state.session) return;
     refreshPush(); // a permissão pode ter mudado nas configurações do celular
+    if (Date.now() - avatarAt > 50 * 60 * 1000) loadAvatar(); // o link da foto vale 1 h
+    if (!$('#sheet').hidden) return;
     if (Date.now() - state.loadedAt > 5 * 60 * 1000) loadData();
   });
 
@@ -295,6 +322,9 @@
     btn.disabled = true;
     try {
       if (signUpMode) {
+        if (password.length < 8 || !/[a-z]/i.test(password) || !/\d/.test(password)) {
+          throw new Error('A senha precisa ter pelo menos 8 caracteres, com letras e números.');
+        }
         const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } });
         if (error) throw error;
         if (!data.session) msg.textContent = 'Conta criada! Confira seu e-mail para confirmar e depois entre.';
@@ -353,7 +383,11 @@
   }
 
   window.addEventListener('popstate', () => {
-    if (nav.ignorePop > 0) { nav.ignorePop--; return; }
+    if (nav.ignorePop > 0) {
+      nav.ignorePop--;
+      if (!nav.ignorePop && nav.pushAfterPop) { nav.pushAfterPop = false; history.pushState({ sheet: true }, ''); }
+      return;
+    }
     if (nav.sheetPushed) { nav.sheetPushed = false; closeSheet(true); return; }
     if (nav.tabPushed) { nav.tabPushed = false; setTab('resumo', true); }
   });
@@ -499,9 +533,9 @@
       bar = `<div class="cat-bar" style="--c:${catColor(c)}"><i style="width:${Math.max(2, (v / max) * 100)}%"></i></div>`;
     }
     return `
-      <button type="button" class="cat-row" data-budget-cat="${esc(c)}" aria-label="${esc(c)}: definir limite">
-        <div class="cat-top"><span><span class="muted">${pct(v, spent)}%</span> ${CAT_ICON[c] || '📦'} ${esc(c)}</span><b class="num">${brl(v)}</b></div>
-        ${bar}${note}
+      <button type="button" class="cat-row" data-budget-cat="${esc(c)}">
+        <div class="cat-top"><span><span class="muted">${pctLabel(v, spent)}</span> ${CAT_ICON[c] || '📦'} ${esc(c)}</span><b class="num">${brl(v)}</b></div>
+        ${bar}${note}<span class="sr-only">Toque para definir o limite</span>
       </button>`;
   }
 
@@ -532,17 +566,30 @@
         if (raw && !(v > 0)) { msg.textContent = `Valor inválido em ${cat}.`; input.focus(); return; }
         const cur = state.budgets.find((b) => b.category === cat);
         if (!v && cur) ops.push(sb.from('budgets').delete().eq('id', cur.id));
-        else if (v && cur && Number(cur.amount) !== v) ops.push(sb.from('budgets').update({ amount: v }).eq('id', cur.id));
+        else if (v && cur && Number(cur.amount) !== v) {
+          // se a linha sumiu (apagada em outro aparelho), o update não altera nada: trata como conflito
+          ops.push(sb.from('budgets').update({ amount: v }).eq('id', cur.id).select()
+            .then((r) => (r.error || r.data?.length ? r : { error: { message: 'duplicate key' } })));
+        }
         else if (v && !cur) ops.push(sb.from('budgets').insert(withProfile({ category: cat, amount: v })));
       }
       if (!ops.length) { closeSheet(); return; }
       const btn = form.querySelector('[type=submit]');
       btn.disabled = true;
       const res = await Promise.all(ops);
-      state.budgets = await optional('budgets'); // relê do banco (mesmo se algo falhou, a tela mostra o que ficou salvo)
+      const fresh = await optional('budgets'); // relê do banco (mesmo se algo falhou, a tela mostra o que ficou salvo)
+      if (fresh) state.budgets = fresh;
       btn.disabled = false;
       const err = res.find((r) => r.error);
-      if (err) { msg.textContent = 'Erro ao salvar: ' + err.error.message; return; }
+      if (err) {
+        msg.textContent = /duplicate key/i.test(err.error.message)
+          ? 'Os limites mudaram em outro aparelho. A lista foi atualizada: confira e salve de novo.'
+          : /does not exist|schema cache/i.test(err.error.message) ? 'Limites indisponíveis no momento. Tente mais tarde.'
+          : 'Erro ao salvar: ' + err.error.message;
+        if (fresh) form.querySelectorAll('[data-cat]').forEach((i) => { const lim = budgetOf(i.dataset.cat); i.value = lim ? moneyInput(lim) : ''; });
+        render();
+        return;
+      }
       closeSheet();
       render();
       toast('Limites salvos');
@@ -575,7 +622,7 @@
         <h2>Próximos vencimentos</h2>
         <ul class="list">${dues.map((d) => `
           <li class="item">
-            <span class="swatch" style="background:${esc(d.card.color)}"></span>
+            <span class="swatch" style="background:${safeColor(d.card.color)}"></span>
             <div class="grow"><div class="title">${esc(d.card.name)}</div>
               <div class="sub${d.off <= 1 ? ' urgent' : ''}">${when(d.off)} · ${dueDate(d.card, d.idx)}</div></div>
             <div class="val num">${brl(d.total)}</div>
@@ -610,7 +657,7 @@
     const { y, m } = parseDate(g.deadline);
     const months = y * 12 + m - curIdx() + 1; // conta o mês atual
     if (months <= 0) return `faltam ${brl(left)} · o prazo passou`;
-    return `faltam ${brl(left)} · ${brl(round2(left / months))}/mês até ${shortMonth(y * 12 + m)}`;
+    return `faltam ${brl(left)} · ${brl(Math.ceil((left / months) * 100) / 100)}/mês até ${shortMonth(y * 12 + m)}`;
   }
 
   function goalsCard() {
@@ -618,8 +665,8 @@
       const p = Number(g.target) > 0 ? Number(g.saved) / Number(g.target) : 0;
       return `
         <button type="button" class="cat-row" data-goal="${g.id}">
-          <div class="cat-top"><span>🎯 ${esc(g.name)}</span><b class="num">${Math.min(100, Math.round(p * 100))}%</b></div>
-          <div class="cat-bar" style="--c:${esc(g.color)}"><i style="width:${Math.min(100, Math.max(2, p * 100))}%"></i></div>
+          <div class="cat-top"><span>🎯 ${esc(g.name)}</span><b class="num">${p < 1 ? Math.floor(p * 100) : Math.round(p * 100)}%</b></div>
+          <div class="cat-bar" style="--c:${safeColor(g.color)}"><i style="width:${Math.min(100, Math.max(2, p * 100))}%"></i></div>
           <div class="cat-note">${brl(Number(g.saved))} de ${brl(Number(g.target))} · ${goalInfo(g)}</div>
         </button>`;
     }).join('');
@@ -632,11 +679,13 @@
   }
 
   const pct = (v, total) => (total > 0 ? Math.round((v / total) * 100) : 0);
+  const pctLabel = (v, total) => { const p = pct(v, total); return v > 0 && p === 0 ? '<1%' : `${p}%`; };
 
   // Rosca por categoria: fatias com um pequeno espaço entre elas, % em cada fatia e o total no meio
   function donut(cats, total) {
     if (!(total > 0)) return '';
     const R = 80, W = 28, C = 2 * Math.PI * R, GAP = cats.length > 1 ? 3 : 0;
+    const ink = isDarkTheme() ? CAT_DARK_INK_DARK : CAT_DARK_INK;
     let off = 0;
     const segs = cats.map(([c, v]) => {
       const len = (v / total) * C, i = catIdx(c);
@@ -646,14 +695,14 @@
         <circle class="seg" cx="100" cy="100" r="${R}" stroke-width="${W}" style="stroke:var(--cat-${i})"
           stroke-dasharray="${Math.max(0.5, len - GAP).toFixed(2)} ${C.toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
           transform="rotate(-90 100 100)"><title>${esc(c)}: ${brl(v)} (${p}%)</title></circle>
-        ${p >= 6 ? `<text x="${(100 + R * Math.cos(mid)).toFixed(1)}" y="${(100 + R * Math.sin(mid)).toFixed(1)}" class="seg-lbl${CAT_DARK_INK.has(i) ? ' ink-dark' : ''}">${p}%</text>` : ''}`;
+        ${p >= 6 ? `<text x="${(100 + R * Math.cos(mid)).toFixed(1)}" y="${(100 + R * Math.sin(mid)).toFixed(1)}" class="seg-lbl${ink.has(i) ? ' ink-dark' : ''}">${p}%</text>` : ''}`;
       off += len;
       return seg;
     }).join('');
     return `
       <div class="donut" role="img" aria-label="Gastos por categoria: ${cats.map(([c, v]) => `${esc(c)} ${pct(v, total)}%`).join(', ')}">
         <svg viewBox="0 0 200 200">${segs}</svg>
-        <div class="donut-center"><small>Total</small><b class="num">${brl(total)}</b></div>
+        <div class="donut-center"><small>Total</small><b class="num${brl(total).length >= 15 ? ' sm' : brl(total).length >= 12 ? ' md' : ''}">${brl(total)}</b></div>
       </div>`;
   }
 
@@ -705,7 +754,7 @@
       html += `
         <section class="card">
           <div class="invoice-head">
-            <span class="swatch" style="background:${esc(g.card.color)}"></span>
+            <span class="swatch" style="background:${safeColor(g.card.color)}"></span>
             <h2>${esc(g.card.name)}</h2>
             <span class="muted">vence ${dueDate(g.card, state.month)}</span>
           </div>
@@ -732,7 +781,7 @@
       <section class="card"><ul class="list">
         ${state.cards.map((c) => `
           <li class="item tap" data-card="${c.id}">
-            <div class="dot" style="background:${esc(c.color)};color:#fff">▭</div>
+            <div class="dot" style="background:${safeColor(c.color)};color:#fff">▭</div>
             <div class="grow"><div class="title">${esc(c.name)}</div>
               <div class="sub">Fecha dia ${c.closing_day} · vence dia ${c.due_day}</div></div>
             <div class="val muted">›</div>
@@ -763,7 +812,7 @@
       const id = p ? p.id : '';
       const on = (p ? p.id : null) === state.profileId;
       const av = p
-        ? `<span class="avatar prof-av" style="background:${esc(p.color)};color:#fff">${esc(p.name[0].toUpperCase())}</span>`
+        ? `<span class="avatar prof-av" style="background:${safeColor(p.color)};color:#fff">${esc(([...p.name][0] || '?').toUpperCase())}</span>`
         : '<span class="avatar prof-av" id="mini-avatar"></span>';
       return `<li class="prof-item${on ? ' on' : ''}">
           <button class="prof-pick" data-prof="${esc(id)}" aria-pressed="${on}">
@@ -899,28 +948,47 @@
       state.profiles = state.profiles.filter((x) => x.id !== prof.id);
       closeSheet();
       if (state.profileId === prof.id) switchProfile(null);
-      else { render(); toast('Perfil apagado'); }
+      else render();
+      toast(`Perfil "${prof.name}" apagado`);
     };
   }
+
+  // Confere a senha atual sem mexer na sessão do app (cliente separado, que não guarda nada no aparelho).
+  // Assim quem pega o celular desbloqueado não consegue trocar a senha nem excluir a conta.
+  async function checkPassword(password) {
+    const tmp = window.supabase.createClient(APP_CONFIG.supabaseUrl, APP_CONFIG.supabaseKey, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false, storageKey: 'sb-check-password' },
+    });
+    const { error } = await tmp.auth.signInWithPassword({ email: state.session.user.email, password });
+    if (!error) await tmp.auth.signOut({ scope: 'local' }).catch(() => {});
+    return error;
+  }
+  const passwordError = (e) => (/invalid login/i.test(e.message) ? 'Senha atual incorreta.' : 'Erro: ' + e.message);
 
   function openPasswordForm() {
     openSheet(`
       <h3>Alterar senha</h3>
       <form id="pwd-form" novalidate>
-        <label>Nova senha<input type="password" name="p1" minlength="6" autocomplete="new-password" required></label>
-        <label>Repita a nova senha<input type="password" name="p2" minlength="6" autocomplete="new-password" required></label>
+        <label>Senha atual<input type="password" name="p0" autocomplete="current-password" required></label>
+        <label>Nova senha<input type="password" name="p1" minlength="8" autocomplete="new-password" required></label>
+        <label>Repita a nova senha<input type="password" name="p2" minlength="8" autocomplete="new-password" required></label>
         <p class="msg error" id="pwd-msg"></p>
         <div class="sheet-actions"><button class="btn primary" type="submit">Salvar nova senha</button></div>
       </form>`);
     const f = $('#pwd-form');
-    setTimeout(() => f.p1.focus(), 50);
+    setTimeout(() => f.p0.focus(), 50);
     f.onsubmit = async (ev) => {
       ev.preventDefault();
       const msg = $('#pwd-msg');
-      if (f.p1.value.length < 6) { msg.textContent = 'A senha precisa ter pelo menos 6 caracteres.'; return; }
+      if (!f.p0.value) { msg.textContent = 'Digite a senha atual.'; return; }
+      if (f.p1.value.length < 8 || !/[a-z]/i.test(f.p1.value) || !/\d/.test(f.p1.value)) {
+        msg.textContent = 'A nova senha precisa ter pelo menos 8 caracteres, com letras e números.'; return;
+      }
       if (f.p1.value !== f.p2.value) { msg.textContent = 'As senhas não são iguais.'; return; }
       const btn = f.querySelector('[type=submit]');
       btn.disabled = true;
+      const bad = await checkPassword(f.p0.value);
+      if (bad) { btn.disabled = false; msg.textContent = passwordError(bad); return; }
       const { error } = await sb.auth.updateUser({ password: f.p1.value });
       btn.disabled = false;
       if (error) {
@@ -938,12 +1006,50 @@
     if (!confirm('Excluir sua conta? Todos os perfis, cartões e gastos serão apagados para sempre.')) return;
     const typed = prompt('Para confirmar, digite EXCLUIR');
     if ((typed || '').trim().toUpperCase() !== 'EXCLUIR') { toast('Exclusão cancelada'); return; }
-    try { await sb.storage.from('avatars').remove([avatarPath()]); } catch {}
+    openSheet(`
+      <h3>Excluir conta</h3>
+      <p class="muted sheet-note">Digite sua senha para confirmar. Depois disso não dá para desfazer.</p>
+      <form id="del-form" novalidate>
+        <label>Senha<input type="password" name="pw" autocomplete="current-password" required></label>
+        <p class="msg error" id="del-msg"></p>
+        <div class="sheet-actions"><button class="btn danger" type="submit">Excluir minha conta</button></div>
+      </form>`);
+    const f = $('#del-form');
+    setTimeout(() => f.pw.focus(), 50);
+    f.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const msg = $('#del-msg'), btn = f.querySelector('[type=submit]');
+      if (!f.pw.value) { msg.textContent = 'Digite sua senha.'; return; }
+      btn.disabled = true;
+      const bad = await checkPassword(f.pw.value);
+      if (bad) { btn.disabled = false; msg.textContent = passwordError(bad); return; }
+      // A foto precisa sair antes (o banco não consegue apagar arquivos). Se falhar, não exclui: senão ela ficaria para sempre.
+      const rm = await sb.storage.from('avatars').remove([avatarPath()]);
+      if (rm.error) { btn.disabled = false; msg.textContent = 'Erro ao apagar a foto: ' + rm.error.message; return; }
+      const done = await finishDeleteAccount();
+      if (!done) btn.disabled = false;
+    };
+  }
+
+  async function finishDeleteAccount() {
     const { error } = await sb.rpc('delete_my_account');
-    if (error) { toast('Erro ao excluir: ' + error.message); return; }
+    if (error) { toast('Erro ao excluir: ' + error.message); return false; }
     try { localStorage.removeItem(profileKey()); } catch {}
-    try { await sb.auth.signOut(); } catch {}
+    closeSheet();
+    await signOutSafe();
     toast('Conta excluída');
+    return true;
+  }
+
+  // Sair: encerra a sessão no servidor (todos os aparelhos). Sem internet o supabase-js devolve erro e NÃO apaga
+  // a sessão (nem com scope 'local', que também chama o servidor): então apaga a sessão guardada aqui e recarrega.
+  async function signOutSafe() {
+    const r = await sb.auth.signOut().catch((e) => ({ error: e }));
+    if (!r?.error) return null;
+    try { localStorage.removeItem(sb.auth.storageKey); } catch {}
+    try { sessionStorage.setItem('signedOutOffline', '1'); } catch {}
+    location.reload();
+    return r.error;
   }
 
   // Tema: 'system' | 'light' | 'dark' (preferência deste aparelho)
@@ -961,8 +1067,10 @@
   // Foto de perfil (guardada no Supabase Storage, pasta privada do usuário)
   const avatarPath = () => `${state.session.user.id}/avatar.jpg`;
 
+  let avatarAt = 0; // quando o link assinado da foto foi gerado
   async function loadAvatar() {
-    const { data, error } = await sb.storage.from('avatars').createSignedUrl(avatarPath(), 60 * 60 * 24 * 7);
+    avatarAt = Date.now();
+    const { data, error } = await sb.storage.from('avatars').createSignedUrl(avatarPath(), 60 * 60); // 1 h: o app gera outro link a cada abertura
     state.avatarUrl = error ? null : data.signedUrl;
     paintAvatars();
     if (state.tab === 'menu') render();
@@ -1067,22 +1175,35 @@
       el.onclick = () => openGoalForm(state.goals.find((x) => x.id === el.dataset.goal));
     });
     const rt = $('#retry'); if (rt) rt.onclick = () => { state.loadError = false; render(); loadData(); };
-    const lo = $('#logout'); if (lo) lo.onclick = async () => { if (confirm('Sair da conta?')) { await unlinkPush(); sb.auth.signOut(); } };
+    const lo = $('#logout'); if (lo) lo.onclick = async () => { if (confirm('Sair da conta?')) {
+      await unlinkPush();
+      await signOutSafe();
+    } };
     bindMenu();
   }
 
   // ---------- Folha inferior ----------
+  let sheetSeq = 0; // muda a cada folha aberta (conteúdo que chega atrasado confere se ainda é a mesma folha)
   function openSheet(html) {
+    sheetSeq++;
     const sh = $('#sheet');
     sh.innerHTML = `<div class="grip"></div>${html}`;
     sh.hidden = false;
     $('#sheet-backdrop').hidden = false;
     document.body.style.overflow = 'hidden';
     loadSeq++; // descarta atualização em andamento (não pode sobrescrever o que for salvo aqui)
-    if (!nav.sheetPushed) { history.pushState({ sheet: true }, ''); nav.sheetPushed = true; }
+    if (!nav.sheetPushed) {
+      // um "voltar" ainda em andamento (folha fechada agora há pouco) desfaria esta entrada: empilha depois dele
+      if (nav.ignorePop > 0) nav.pushAfterPop = true; else history.pushState({ sheet: true }, '');
+      nav.sheetPushed = true;
+    }
+    $('#sheet').oninput = () => { const m = $('#sheet').querySelector('.msg.error'); if (m) m.textContent = ''; }; // corrigiu o campo: some o erro
   }
   function closeSheet(fromPop = false) {
-    if (!fromPop && nav.sheetPushed) { nav.sheetPushed = false; historyBack(); }
+    if (!fromPop && nav.sheetPushed) {
+      nav.sheetPushed = false;
+      if (nav.pushAfterPop) nav.pushAfterPop = false; else historyBack();
+    }
     $('#sheet').hidden = true;
     $('#sheet-backdrop').hidden = true;
     document.body.style.overflow = '';
@@ -1094,6 +1215,7 @@
   async function openLegal(href) {
     const [file, hash] = href.split('#');
     openSheet('<p class="muted" style="text-align:center;padding:24px 0">Carregando…</p>');
+    const mine = sheetSeq;
     let html = '';
     try {
       const res = await fetch(file);
@@ -1107,7 +1229,7 @@
     } catch {
       html = '<p class="msg error">Não foi possível abrir agora. Verifique a internet e tente de novo.</p>';
     }
-    if ($('#sheet').hidden) return; // fechou enquanto carregava
+    if ($('#sheet').hidden || sheetSeq !== mine) return; // fechou ou abriu outra folha enquanto carregava
     $('#sheet').innerHTML = `<div class="grip"></div>${html}`;
     $('#sheet').scrollTop = 0;
     const close = $('#legal-close');
@@ -1126,13 +1248,13 @@
 
   function chipGroup(name, options, current) {
     return `<div class="chips" data-group="${name}">${options.map(([v, label]) =>
-      `<button type="button" class="chip${String(v) === String(current) ? ' on' : ''}" data-v="${esc(v)}">${label}</button>`).join('')}</div>`;
+      `<button type="button" class="chip${String(v) === String(current) ? ' on' : ''}" aria-pressed="${String(v) === String(current)}" data-v="${esc(v)}">${label}</button>`).join('')}</div>`;
   }
   function bindChips(root, onChange) {
     root.querySelectorAll('[data-group]').forEach((g) => {
       g.querySelectorAll('.chip').forEach((c) => {
         c.onclick = () => {
-          g.querySelectorAll('.chip').forEach((x) => x.classList.toggle('on', x === c));
+          g.querySelectorAll('.chip').forEach((x) => { x.classList.toggle('on', x === c); x.setAttribute('aria-pressed', String(x === c)); });
           onChange && onChange();
         };
       });
@@ -1160,7 +1282,7 @@
             value="${exp ? cur.amount.toFixed(2).replace('.', ',') : ''}"></label>
         <label>Descrição<input name="description" maxlength="80" required placeholder="Ex.: Mercado, Internet, Financiamento" value="${esc(e.description)}"></label>
         <div><label style="margin-bottom:6px">Categoria</label>${chipGroup('category', CATEGORIES.map(([c, i]) => [c, `${i} ${c}`]), e.category)}</div>
-        <div><label style="margin-bottom:6px">Pagamento</label>${chipGroup('card', payOpts, cur.card_id || '')}</div>
+        <div><label style="margin-bottom:6px">Pagamento</label>${chipGroup('card', payOpts, cardById(cur.card_id) ? cur.card_id : '')}</div>
         <div class="grid2">
           <label><span id="date-label">Data da compra</span><input type="date" name="purchase_date" required value="${e.purchase_date}"></label>
           <label id="inst-wrap">Parcelas
@@ -1217,7 +1339,8 @@
         else if (start !== null) txt += n ? ` · de ${monthName(start)} até ${monthName(start + n - 1)} (${n}x)` : ` · a partir de ${monthName(start)}, sem data para acabar`;
       } else if (k === 'installment') {
         const n = row.installments;
-        txt = `${n}x de ${brl(amount / n)}`;
+        const per = round2(amount / n), lastP = round2(amount - per * (n - 1));
+        txt = lastP === per ? `${n}x de ${brl(per)}` : `${n - 1}x de ${brl(per)} + 1x de ${brl(lastP)}`;
         if (start !== null) txt += ` · de ${monthName(start)} até ${monthName(start + n - 1)}`;
       } else {
         txt = brl(amount);
@@ -1250,6 +1373,7 @@
       if (!(row.amount > 0)) { msg.textContent = 'Informe um valor válido.'; return; }
       if (!row.description) { msg.textContent = 'Informe uma descrição.'; return; }
       if (!row.purchase_date) { msg.textContent = 'Informe a data.'; return; }
+      if (row.recurring && !validMonths(form.recur_count.value)) { msg.textContent = 'Meses: use um número inteiro de 1 a 600, ou deixe em branco para sem fim.'; return; }
       const forward = isForward(row);
       // Conta fixa continua conta fixa: valor/cartão/divisão novos valem a partir do mês na tela
       const data = exp && exp.recurring && row.recurring
@@ -1321,10 +1445,11 @@
         recur_count: rec && rc > 0 ? Math.min(rc, 600) : null,
       };
     };
-    const isForward = (row) => fromIdx !== null && row.recurring && row.income_date === inc.income_date && row.amount !== incAmountAt(inc, fromIdx);
+    const isForward = (row) => fromIdx !== null && row.recurring && row.amount !== incAmountAt(inc, fromIdx);
     const update = () => {
       const row = readRow();
       $('#inc-recur-wrap').hidden = !row.recurring;
+      const endBtn = $('#inc-end'); if (endBtn) endBtn.hidden = !row.recurring;
       $('#inc-amount-label').textContent = row.recurring ? 'Valor por mês' : 'Valor';
       $('#inc-date-label').textContent = row.recurring ? 'Primeiro mês (data)' : 'Data';
       const pv = $('#inc-preview');
@@ -1360,6 +1485,7 @@
       if (!(row.amount > 0)) { msg.textContent = 'Informe um valor válido.'; return; }
       if (!row.description) { msg.textContent = 'Informe uma descrição.'; return; }
       if (!row.income_date) { msg.textContent = 'Informe a data.'; return; }
+      if (row.recurring && !validMonths(form.recur_count.value)) { msg.textContent = 'Meses: use um número inteiro de 1 a 600, ou deixe em branco para sem fim.'; return; }
       const forward = inc && isForward(row);
       const data = inc ? incomeForward(inc, row, Math.max(state.month, start0)) : { ...row, recur_changes: [] };
       const btn = form.querySelector('[type=submit]');
@@ -1388,7 +1514,8 @@
 
   // ---------- Formulário de meta ----------
   function openGoalForm(goal) {
-    const g = goal || { name: '', target: '', saved: 0, deadline: null, color: COLORS[(state.goals.length + 3) % COLORS.length] };
+    const AUTO = COLORS.filter((c) => c !== '#111827'); // cor automática: sem o quase-preto (some no tema escuro)
+    const g = goal || { name: '', target: '', saved: 0, deadline: null, color: AUTO[(state.goals.length + 2) % AUTO.length] };
     let color = g.color;
     openSheet(`
       <h3>${goal ? esc(goal.name) : 'Nova meta'}</h3>
@@ -1432,6 +1559,7 @@
       const row = readRow();
       const pv = $('#goal-preview');
       if (!(row.target > 0)) { pv.textContent = 'Digite o valor da meta para ver quanto guardar por mês.'; return; }
+      if (!goal && !(row.saved >= 0)) { pv.textContent = 'O valor já guardado está inválido.'; return; }
       pv.textContent = goalInfo({ ...row, saved: goal ? goal.saved : row.saved || 0 }).replace(/^faltam/, 'Faltam');
     };
     form.addEventListener('input', update);
@@ -1469,8 +1597,12 @@
       if (!(v > 0)) { $('#goal-msg').textContent = 'Digite o valor para guardar ou retirar.'; $('#goal-move-val').focus(); return; }
       const saved = round2(Number(goal.saved) + sign * v);
       if (saved < 0) { $('#goal-msg').textContent = `Você só tem ${brl(Number(goal.saved))} guardado nessa meta.`; return; }
-      const reached = sign > 0 && saved >= Number(goal.target) && Number(goal.saved) < Number(goal.target);
-      await save({ saved }, reached ? '🎉 Meta alcançada!' : sign > 0 ? `Guardado ${brl(v)}` : `Retirado ${brl(v)}`);
+      // Se o nome, o valor, o prazo ou a cor foram editados, salva junto (não descarta o que foi digitado)
+      const row = readRow();
+      const edits = row.name && row.target > 0 ? { name: row.name, target: row.target, deadline: row.deadline, color } : {};
+      const target = edits.target ?? Number(goal.target);
+      const reached = sign > 0 && saved >= target && Number(goal.saved) < target;
+      await save({ ...edits, saved }, reached ? '🎉 Meta alcançada!' : sign > 0 ? `Guardado ${brl(v)}` : `Retirado ${brl(v)}`);
     };
     if (goal) {
       $('#goal-in').onclick = () => move(1);
@@ -1494,11 +1626,15 @@
 
   // "1.234,56" | "1234.56" | "-50,00" | "50,00-" | "(50,00)" → número
   function parseAmount(raw) {
-    let s = String(raw).trim();
-    const neg = /^-|-$|^\(.*\)$|^-?\s*R\$\s*-/.test(s.replace(/\s/g, ''));
-    s = s.replace(/[^\d.,]/g, '');
-    if (/,\d{1,2}$/.test(s)) s = s.replace(/\./g, '').replace(',', '.');
-    else s = s.replace(/,/g, '');
+    const c = String(raw).replace(/\s/g, '');
+    // só sinal, R$, parênteses, "D"/"C" no fim e dígitos com . e , ("1e308", "0x10", "12abc" → inválido)
+    if (!/^[-+(]?(R\$)?[-+]?[\d.,]+\)?-?[DC]?$/i.test(c)) return NaN;
+    const neg = /^-|-$|^\(.*\)$|^-?R\$-/i.test(c);
+    let s = c.replace(/[^\d.,]/g, '');
+    if (/^([1-9]\d{0,2}(\.\d{3})+|\d+),\d{1,2}$/.test(s)) s = s.replace(/\./g, '').replace(',', '.'); // 1.234,56
+    else if (/^[1-9]\d{0,2}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');                        // 1.500
+    else if (/^([1-9]\d{0,2}(,\d{3})+|\d+)(\.\d{1,2})?$/.test(s)) s = s.replace(/,/g, '');        // 1,234.56 (OFX/CSV em inglês)
+    else return NaN;                                                                          // "0,001", "1.2.3,4"
     const v = parseFloat(s);
     return Number.isFinite(v) ? round2(neg ? -v : v) : NaN;
   }
@@ -1514,50 +1650,67 @@
   function parseDateText(s, idx) {
     let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
     if (m) return resolveDate(+m[3], +m[2] - 1, +m[1], idx);
-    m = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/.exec(s);
+    m = /^(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?/.exec(s);
     if (m) return resolveDate(+m[1], +m[2] - 1, m[3] ? +m[3] : null, idx);
     m = /^(\d{1,2})[\s/.-]*([a-zç]{3})[a-zç]*\.?(?:[\s/.-]+(\d{4}))?/i.exec(norm(s));
     if (m && m[2] in MON) return resolveDate(+m[1], MON[m[2]], m[3] ? +m[3] : null, idx);
     return null;
   }
 
-  // Parcela na descrição: "Parcela 3/10", "03/10", "3 de 10" → { k, n } e descrição sem o trecho
+  // Parcela na descrição → { k, n } e descrição sem o trecho. Aceita "Parcela 3/10", "PARC 02/12", "parcela 3 de 10",
+  // "03/10" (dois dígitos) e "4/12" no fim. Não pega "1/2 porção" nem "24/7".
   function splitInstallment(desc) {
-    const re = /\b(?:parc(?:ela)?\.?\s*)?(\d{1,2})\s*(?:\/|de)\s*(\d{1,2})\b/i;
-    const m = re.exec(desc);
-    if (m) {
+    const pats = [
+      /\bparc(?:ela)?\.?\s*(\d{1,2})\s*(?:\/|de)\s*(\d{1,2})\b/i,
+      /(?:^|\s)(\d{2})\/(\d{2})(?=\s|$)/,
+      /(?:^|\s)(\d{1,2})\/(\d{1,2})\s*$/,
+    ];
+    for (const re of pats) {
+      const m = re.exec(desc);
+      if (!m) continue;
       const k = +m[1], n = +m[2];
       if (n >= 2 && n <= 48 && k >= 1 && k <= n) return { k, n, desc: desc.replace(m[0], ' ').replace(/\s+/g, ' ').replace(/[\s\-–·]+$/, '').trim() };
     }
     return { k: 1, n: 1, desc };
   }
 
-  const IGNORE_RE = /pagamento|pgto\b|^total|saldo|limite|minimo|vencimento|fechamento|fatura anterior|encargos do rotativo/;
+  const IGNORE_RE = /pagamento|pgto\b|^total|total a pagar|saldo|limite|minimo|vencimento|fechamento|emissao|periodo|melhor dia|fatura anterior|encargos do rotativo/;
 
+  const MAX_IMPORT_AMOUNT = 1000000; // lançamento acima de R$ 1 milhão num arquivo de fatura = arquivo estranho
   function makeItem(date, desc, amount) {
-    desc = desc.replace(/R\$/g, '').replace(/[•*]{2,}\s*\d{4}/g, '').replace(/\s+/g, ' ').replace(/^[\s\-–·|]+|[\s\-–·|]+$/g, '').trim();
-    if (!date || !desc || !Number.isFinite(amount) || IGNORE_RE.test(norm(desc))) return null;
+    if (!(Math.abs(amount) <= MAX_IMPORT_AMOUNT)) return null;
+    desc = String(desc).slice(0, 200).replace(/R\$/g, '') // corta antes dos regex (texto gigante travava o app).replace(/[•*]{2,}\s*\d{4}/g, '').replace(/\s+/g, ' ').replace(/^[\s\-–·|]+|[\s\-–·|]+$/g, '').trim();
+    if (!date || !/[a-z]/i.test(norm(desc)) || !Number.isFinite(amount) || IGNORE_RE.test(norm(desc))) return null; // sem letras = linha de datas/valores
     const inst = splitInstallment(desc);
     return { date, desc: inst.desc || desc, amount, k: inst.k, n: inst.n };
   }
 
-  // Linhas de texto do PDF → lançamentos ("12 NOV Mercado R$ 34,90", "12/11 UBER 27,50")
+  // Linhas de texto do PDF → lançamentos ("12 NOV Mercado R$ 34,90", "12/11 UBER 2345,67", "05 NOV 2025 LOJA 9,90")
+  const MON_ALT = 'jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez';
   function itemsFromLines(lines, idx) {
     const out = [];
-    const DATE_RE = /^(\d{1,2})(?:\/(\d{1,2})(?:\/(\d{2,4}))?|[\s.-]*(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-z]*\.?)(?=\s|$)/i;
-    const MONEY_RE = /-?\s*(?:R\$\s*)?-?\s*\d{1,3}(?:\.\d{3})*,\d{2}(?!\d)-?/g;
-    for (const raw of lines) {
+    const DATE_RE = new RegExp(`^(\\d{1,2})(?:\\/(\\d{1,2})(?:\\/(\\d{2,4}))?|[\\s.-]*(${MON_ALT})[a-z]*\\.?(?:\\s+(20\\d{2}))?)(?=\\s|$)`, 'i');
+    // valor: com ou sem ponto de milhar; sinal de menos só colado ao valor ("-R$ 50,00", "50,00-")
+    const MONEY_RE = /(-)?(?:R\$\s*)?(-)?(?<![\d.,])((?:\d{1,3}(?:\.\d{3})+|\d+),\d{2})(?![\d,])(-)?/g;
+    // fatura em duas colunas: quebra a linha onde começa outra data logo depois de um valor
+    const SPLIT_RE = new RegExp(`(?<=\\d,\\d{2}-?)\\s+(?=\\d{1,2}(?:\\/\\d{1,2}|\\s*(?:${MON_ALT})\\b))`, 'i');
+    // um espaço só entre as palavras e no máximo 500 caracteres por linha: sem isso, um PDF com milhares de
+    // espaços seguidos fazia os regex abaixo travarem o app por minutos (ReDoS)
+    const clean = lines.map((l) => String(l).replace(/\s+/g, ' ').slice(0, 500));
+    for (const raw of clean.flatMap((l) => l.split(SPLIT_RE))) {
       const line = raw.trim();
       const dm = DATE_RE.exec(norm(line));
       if (!dm) continue;
-      const date = dm[2] ? resolveDate(+dm[1], +dm[2] - 1, dm[3] ? +dm[3] : null, idx) : resolveDate(+dm[1], MON[dm[4].slice(0, 3).toLowerCase()], null, idx);
+      const date = dm[2] ? resolveDate(+dm[1], +dm[2] - 1, dm[3] ? +dm[3] : null, idx)
+        : resolveDate(+dm[1], MON[dm[4].slice(0, 3).toLowerCase()], dm[5] ? +dm[5] : null, idx);
       const rest = line.slice(dm[0].length);
       const monies = [...rest.matchAll(MONEY_RE)];
       if (!monies.length) continue;
       const last = monies[monies.length - 1];
       let desc = rest.slice(0, last.index);
       for (const mm of monies.slice(0, -1)) desc = desc.replace(mm[0], ' ');
-      const it = makeItem(date, desc, parseAmount(last[0]));
+      const neg = !!(last[1] || last[2] || last[4]);
+      const it = makeItem(date, desc, (neg ? -1 : 1) * parseAmount(last[3]));
       if (it) out.push(it);
     }
     return out;
@@ -1578,7 +1731,7 @@
         else cur += ch;
       }
       out.push(cur.trim());
-      return out;
+      return out.map((c) => c.slice(0, 300));
     };
     const rows = lines.map(cells);
     const head = rows[0].map(norm);
@@ -1615,19 +1768,29 @@
     }).filter(Boolean);
   }
 
+  // pdf.js e o worker dele com conferência de integridade (SRI): se o CDN entregar outro arquivo, não roda
   async function loadPdfJs() {
-    if (!window.pdfjsLib) await loadScript('https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js');
-    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+    if (!window.pdfjsLib) await loadScript(LIBS.pdf.src, LIBS.pdf.sri);
+    const opts = window.pdfjsLib.GlobalWorkerOptions;
+    if (!opts.workerPort) {
+      const r = await fetch(LIBS.pdfWorker.src, { integrity: LIBS.pdfWorker.sri, mode: 'cors', credentials: 'omit' });
+      if (!r.ok) throw new Error('Falha ao carregar o leitor de PDF');
+      opts.workerPort = new Worker(URL.createObjectURL(await r.blob()));
+    }
     return window.pdfjsLib;
   }
 
+  const MAX_PDF_PAGES = 50;
   // Texto do PDF agrupado em linhas (mesma altura na página), da esquerda para a direita
   async function pdfLines(buf) {
     const lib = await loadPdfJs();
     let password;
     for (;;) {
+      let doc;
       try {
-        const doc = await lib.getDocument({ data: buf.slice(0), password }).promise;
+        // isEvalSupported: false fecha a falha CVE-2024-4367 do pdf.js 3.x (PDF com fonte maliciosa rodando código)
+        doc = await lib.getDocument({ data: buf.slice(0), password, isEvalSupported: false, enableXfa: false }).promise;
+        if (doc.numPages > MAX_PDF_PAGES) throw new Error(`PDF com ${doc.numPages} páginas: o limite é ${MAX_PDF_PAGES}`);
         const lines = [];
         for (let p = 1; p <= doc.numPages; p++) {
           const { items } = await (await doc.getPage(p)).getTextContent();
@@ -1646,19 +1809,32 @@
         if (err?.name !== 'PasswordException') throw err;
         password = prompt(err.code === 2 ? 'Senha incorreta. Tente de novo:' : 'Esse PDF tem senha (muitos bancos usam os primeiros dígitos do CPF). Digite a senha:');
         if (password == null) throw new Error('PDF com senha: conferência cancelada');
+      } finally {
+        doc?.destroy(); // libera o documento (e a senha) da memória
       }
     }
   }
 
-  async function readStatement(file, idx) {
+  const MAX_STATEMENT_BYTES = 5 * 1024 * 1024, MAX_STATEMENT_ITEMS = 500;
+  // Lê o arquivo uma vez e devolve parse(idx): as datas sem ano dependem do mês da fatura escolhido
+  async function loadStatement(file) {
+    if (file.size > MAX_STATEMENT_BYTES) throw new Error('arquivo grande demais (máximo 5 MB)');
     const name = file.name.toLowerCase();
-    let items;
-    if (name.endsWith('.pdf') || file.type === 'application/pdf') items = itemsFromLines(await pdfLines(await file.arrayBuffer()), idx);
-    else {
-      const text = await file.text();
-      items = /<STMTTRN>/i.test(text) ? parseOFX(text, idx) : parseCSV(text, idx);
-      // Alguns bancos exportam as compras com sinal negativo: se a maioria é negativa, inverte
-      if (items.filter((i) => i.amount < 0).length > items.filter((i) => i.amount > 0).length) items.forEach((i) => (i.amount = -i.amount));
+    if (name.endsWith('.pdf') || file.type === 'application/pdf') {
+      const lines = await pdfLines(await file.arrayBuffer());
+      return (idx) => finishItems(itemsFromLines(lines, idx), false);
+    }
+    const text = await file.text();
+    return (idx) => finishItems(/<STMTTRN>/i.test(text) ? parseOFX(text, idx) : parseCSV(text, idx), true);
+  }
+
+  function finishItems(items, fixSign) {
+    if (fixSign) {
+      // Alguns bancos exportam as compras com sinal negativo. Um estorno/crédito no arquivo mostra o costume do banco;
+      // sem isso, vale a maioria.
+      const credit = items.find((i) => /estorno|credito|devoluc|reembolso|cashback/.test(norm(i.desc)));
+      const flip = credit ? credit.amount > 0 : items.filter((i) => i.amount < 0).length > items.filter((i) => i.amount > 0).length;
+      if (flip) items.forEach((i) => (i.amount = -i.amount));
     }
     const credits = items.filter((i) => !(i.amount > 0)).length; // estornos e créditos ficam de fora
     return { items: items.filter((i) => i.amount > 0), credits };
@@ -1667,6 +1843,10 @@
   // Categoria pelo histórico (mesma palavra em gasto anterior) ou por palavras conhecidas
   function guessCategory(desc) {
     const words = (s) => norm(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !/^\d+$/.test(w));
+    // Nomes que enganam o histórico ("Uber Eats" não é Uber, "Mercado Livre" não é mercado)
+    const strong = [['Alimentação', /uber ?eats|ifood|rappi/], ['Compras', /mercado ?livre|amazon|shopee|aliexpress/]];
+    const hit = strong.find(([, re]) => re.test(norm(desc)));
+    if (hit) return hit[0];
     const mine = new Set(words(desc));
     let best = null, score = 0;
     for (const e of state.expenses) {
@@ -1675,14 +1855,14 @@
     }
     if (best) return best;
     const d = norm(desc);
-    const rules = [
-      ['Transporte', /uber|99app|99 |posto|shell|ipiranga|combust|estacion|pedagio|sem parar|veloe/],
-      ['Alimentação', /ifood|restaur|lanch|burger|pizza|padaria|cafe|rappi|mcdonald|bk /],
+    const rules = [ // a ordem importa: o mais específico primeiro
+      ['Alimentação', /ifood|uber ?eats|restaur|lanch|burger|pizza|padaria|cafe|rappi|mcdonald|\bbk\b|churrasc/],
+      ['Compras', /amazon|shopee|mercado ?livre|magalu|aliexpress|shein|americanas/],
+      ['Assinaturas', /netflix|spotify|prime video|disney|youtube|hbo|max\.com|globoplay|apple\.com|google one|icloud/],
+      ['Transporte', /\buber\b|99app|\b99\b|posto|shell|ipiranga|combust|estacion|pedagio|sem parar|veloe/],
       ['Mercado', /mercad|supermerc|atacad|assai|carrefour|hortifruti|acougue/],
       ['Saúde', /farm|drog|raia|pague menos|clinica|hospital|laborat/],
-      ['Assinaturas', /netflix|spotify|prime video|disney|youtube|hbo|max\.com|globoplay|apple\.com|google one|icloud/],
-      ['Compras', /amazon|shopee|mercadolivre|mercado livre|magalu|aliexpress|shein|americanas/],
-      ['Contas', /claro|vivo|tim |oi |enel|sabesp|copel|cemig|energia|internet/],
+      ['Contas', /\b(claro|vivo|tim|oi|enel|sabesp|copel|cemig)\b|energia|internet/],
     ];
     return (rules.find(([, re]) => re.test(d)) || ['Outros'])[0];
   }
@@ -1705,7 +1885,7 @@
       const sw = words(s.desc);
       let best = -1, bestScore = -Infinity;
       app.forEach((a, i) => {
-        if (used.has(i) || Math.abs(a.mine - s.amount) > 0.01) return;
+        if (used.has(i) || Math.abs(a.total - s.amount) > 0.01) return; // o banco cobra o valor cheio (sem divisão)
         const name = [...words(a.exp.description)].filter((w) => sw.has(w)).length;
         const days = Math.abs(new Date(a.exp.purchase_date) - new Date(s.date)) / 864e5;
         const sc = name * 100 - Math.min(days, 60);
@@ -1742,8 +1922,14 @@
       </form>
       <div id="chk-result"></div>`);
     const form = $('#chk-form');
-    let last = null; // { stmt, credits, card, idx, fileName }
-    const rerun = () => { if (last) { last.card = cardById(chipVal(form, 'card')); last.idx = Number(chipVal(form, 'month')); showResult(); } };
+    let last = null; // { parse, stmt, credits, card, idx, fileName }
+    const rerun = () => {
+      if (!last) return;
+      last.card = cardById(chipVal(form, 'card'));
+      const idx = Number(chipVal(form, 'month'));
+      if (idx !== last.idx) { const r = last.parse(idx); Object.assign(last, { idx, stmt: r.items, credits: r.credits }); } // relê datas sem ano
+      showResult();
+    };
     bindChips(form, rerun);
 
     $('#chk-file').onchange = async (ev) => {
@@ -1753,10 +1939,13 @@
       box.innerHTML = '<p class="muted" style="text-align:center">Lendo a fatura…</p>';
       const idx = Number(chipVal(form, 'month'));
       try {
-        const { items, credits } = await readStatement(file, idx);
-        last = { stmt: items, credits, card: cardById(chipVal(form, 'card')), idx, fileName: file.name };
+        const parse = await loadStatement(file);
+        const { items, credits } = parse(idx);
+        if (items.length > MAX_STATEMENT_ITEMS) throw new Error(`a fatura tem ${items.length} lançamentos e o limite é ${MAX_STATEMENT_ITEMS}`);
+        last = { parse, stmt: items, credits, card: cardById(chipVal(form, 'card')), idx, fileName: file.name };
         showResult();
       } catch (err) {
+        last = null;
         box.innerHTML = `<p class="msg error">Não consegui ler o arquivo: ${esc(err.message)}</p>`;
       }
       ev.target.value = '';
@@ -1772,7 +1961,7 @@
       }
       const { matched, missing, extra } = compareInvoice(stmt, card, idx);
       const sum = (a) => round2(a.reduce((s, x) => s + x, 0));
-      const bank = sum(stmt.map((s) => s.amount)), app = sum([...matched.map((m) => m.a.mine), ...extra.map((e) => e.mine)]);
+      const bank = sum(stmt.map((s) => s.amount)), app = sum([...matched.map((m) => m.a.total), ...extra.map((e) => e.total)]);
       const diff = round2(bank - app);
       const label = (s) => `${fmtDate(s.date)}${s.n > 1 ? ` · ${s.k}/${s.n}` : ''}`;
       box.innerHTML = `
@@ -1794,7 +1983,7 @@
           <p class="muted sheet-note">Pode ser compra lançada no mês errado, valor diferente ou algo que ainda não entrou na fatura.</p>
           <ul class="list">${extra.map(entryRow).join('')}</ul>` : ''}
         ${matched.length ? `<p class="muted sheet-note">✔ ${matched.length} lançamento(s) conferido(s).</p>` : ''}
-        ${credits ? `<p class="muted sheet-note">${credits} crédito(s), estorno(s) ou pagamento(s) foram ignorados.</p>` : ''}`;
+        ${credits ? `<p class="muted sheet-note">${credits} crédito(s) ou estorno(s) ficaram de fora (pagamentos também são ignorados).</p>` : ''}`;
       box.querySelectorAll('[data-exp]').forEach((el) => {
         el.onclick = () => openExpenseForm(state.expenses.find((x) => x.id === el.dataset.exp));
       });
@@ -1802,14 +1991,18 @@
       if (add) add.onclick = async () => {
         const pick = [...box.querySelectorAll('[data-miss]:checked')].map((c) => missing[Number(c.dataset.miss)]);
         if (!pick.length) { toast('Marque pelo menos um lançamento'); return; }
+        if (pick.length > 50 && !confirm(`Adicionar ${pick.length} lançamentos de uma vez?`)) return;
         add.disabled = true;
-        const { data, error } = await sb.from('expenses').insert(pick.map((s) => withProfile(rowFromStatement(s, card, idx)))).select();
+        const added = [];
+        let error = null;
+        for (let i = 0; i < pick.length && !error; i += 100) { // em lotes de 100
+          const r = await sb.from('expenses').insert(pick.slice(i, i + 100).map((s) => withProfile(rowFromStatement(s, card, idx)))).select();
+          if (r.error) error = r.error; else added.push(...r.data);
+        }
         add.disabled = false;
-        if (error) { toast('Erro ao adicionar: ' + error.message); return; }
-        state.expenses.unshift(...data);
-        render();
-        showResult();
-        toast(`${data.length} lançamento(s) adicionado(s)`);
+        if (added.length) { state.expenses.unshift(...added); render(); showResult(); }
+        if (error) { toast(`Erro ao adicionar${added.length ? ` (${added.length} já entraram)` : ''}: ${error.message}`); return; }
+        toast(`${added.length} lançamento(s) adicionado(s)`);
       };
     }
   }
@@ -1844,7 +2037,11 @@
     }
   }
 
+  let pushBusy = false;
   async function enablePush() {
+    if (pushBusy) return; // toque duplo
+    pushBusy = true;
+    let sub = null;
     try {
       const perm = await Notification.requestPermission();
       if (perm !== 'granted') { await refreshPush(); toast('Sem permissão para notificações'); return; }
@@ -1854,7 +2051,7 @@
       if (error || !data?.publicKey) throw new Error(error?.message || 'servidor sem chave');
       const old = await reg.pushManager.getSubscription();
       if (old) await old.unsubscribe(); // chave antiga: inscreve de novo
-      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(data.publicKey) });
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(data.publicKey) });
       await saveSub(sub);
       pushSynced = true;
       state.push = 'on';
@@ -1862,7 +2059,13 @@
       toast('Avisos ativados');
       sb.functions.invoke('due-reminders', { body: { action: 'test' } }).catch(() => {}); // notificação de teste
     } catch (err) {
+      // o servidor não guardou o celular: desfaz a inscrição para a tela não dizer "Ativados" sem ser verdade
+      if (sub) { try { await sub.unsubscribe(); } catch {} }
+      pushSynced = false;
+      await refreshPush();
       toast('Não foi possível ativar: ' + err.message);
+    } finally {
+      pushBusy = false;
     }
   }
 
@@ -1872,7 +2075,8 @@
       const reg = await swReady();
       const sub = reg && (await reg.pushManager.getSubscription());
       if (sub) {
-        await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+        const { error } = await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+        if (error) { toast('Não foi possível desativar agora: ' + error.message); return; }
         await sub.unsubscribe();
       }
     } catch {}
@@ -1938,7 +2142,7 @@
       const row = { name: form.name.value.trim(), closing_day: Number(form.closing_day.value), due_day: Number(form.due_day.value), color };
       const msg = $('#card-msg');
       if (!row.name) { msg.textContent = 'Informe o nome do cartão.'; return; }
-      if (!(row.closing_day >= 1 && row.closing_day <= 31 && row.due_day >= 1 && row.due_day <= 31)) { msg.textContent = 'Os dias devem estar entre 1 e 31.'; return; }
+      if (![row.closing_day, row.due_day].every((d) => Number.isInteger(d) && d >= 1 && d <= 31)) { msg.textContent = 'Os dias devem ser números inteiros entre 1 e 31.'; return; }
       const btn = form.querySelector('[type=submit]');
       btn.disabled = true; // evita cadastrar o mesmo cartão duas vezes com toque duplo
       const res = card
@@ -1956,12 +2160,15 @@
     const del = $('#card-del');
     if (del) del.onclick = async () => {
       const used = state.expenses.filter((x) => x.card_id === card.id || (x.recur_changes || []).some((c) => c.card_id === card.id)).length;
-      const warn = used ? `\n\n${used} gasto(s) desse cartão passarão a contar como "Pix / boleto".` : '';
+      const warn = used ? `\n\n${used} gasto(s) desse cartão passarão a contar como "Pix / boleto", no mês da COMPRA (não mais no mês da fatura). Por isso os totais de meses passados podem mudar.` : '';
       if (!confirm(`Excluir o cartão "${card.name}"?${warn}`)) return;
       const { error } = await sb.from('cards').delete().eq('id', card.id);
       if (error) { $('#card-msg').textContent = 'Erro ao excluir: ' + error.message; return; }
       state.cards = state.cards.filter((x) => x.id !== card.id);
-      state.expenses = state.expenses.map((x) => (x.card_id === card.id ? { ...x, card_id: null } : x));
+      state.expenses = state.expenses.map((x) => ({
+        ...x, card_id: x.card_id === card.id ? null : x.card_id,
+        recur_changes: (x.recur_changes || []).map((c) => (c.card_id === card.id ? { ...c, card_id: null } : c)),
+      }));
       closeSheet();
       render();
       toast('Cartão excluído');
@@ -1969,10 +2176,18 @@
   }
 
   // ---------- Exportar Excel (mesmo layout das planilhas de fatura) ----------
-  function loadScript(src) {
+  // Bibliotecas carregadas sob demanda, com o hash do arquivo exato (SRI): se o CDN mudar o arquivo, o navegador recusa
+  const CDN = 'https://cdn.jsdelivr.net/npm/';
+  const LIBS = {
+    excel: { src: CDN + 'exceljs@4.4.0/dist/exceljs.min.js', sri: 'sha384-Pqp51FUN2/qzfxZxBCtF0stpc9ONI6MYZpVqmo8m20SoaQCzf+arZvACkLkirlPz' },
+    pdf: { src: CDN + 'pdfjs-dist@3.11.174/build/pdf.min.js', sri: 'sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e' },
+    pdfWorker: { src: CDN + 'pdfjs-dist@3.11.174/build/pdf.worker.min.js', sri: 'sha384-SnzOobpRMLXZ52iJvZm/C0fYw0OQemTXzTjIsdsfMcrCtCEe9qgzxTd3RSklO5x2' },
+  };
+  function loadScript(src, integrity) {
     return new Promise((res, rej) => {
       const s = document.createElement('script');
-      s.src = src; s.onload = res; s.onerror = () => rej(new Error('Falha ao carregar ' + src));
+      s.src = src; s.integrity = integrity; s.crossOrigin = 'anonymous';
+      s.onload = res; s.onerror = () => rej(new Error('Falha ao carregar ' + src));
       document.head.appendChild(s);
     });
   }
@@ -1982,7 +2197,7 @@
     btn.disabled = true;
     btn.textContent = 'Gerando…';
     try {
-      if (!window.ExcelJS) await loadScript('https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js');
+      if (!window.ExcelJS) await loadScript(LIBS.excel.src, LIBS.excel.sri);
       const idx = state.month;
       const groups = monthGroups(idx);
       const wb = new ExcelJS.Workbook();
@@ -2049,7 +2264,7 @@
 
   // ---------- Início ----------
   applyTheme(getTheme());
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme(getTheme()));
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { applyTheme(getTheme()); if (!$('#app').hidden) render(); });
   if ('serviceWorker' in navigator) {
     // Quando uma versão nova do app é instalada, recarrega uma vez para já mostrar a atualização
     const hadController = !!navigator.serviceWorker.controller;
@@ -2065,4 +2280,10 @@
       .catch(() => {});
   }
   // A tela inicial (login ou app) é decidida pelo onAuthStateChange, que dispara ao abrir (evento INITIAL_SESSION)
+  try {
+    if (sessionStorage.getItem('signedOutOffline')) {
+      sessionStorage.removeItem('signedOutOffline');
+      toast('Sem internet: você saiu deste aparelho. Nos outros aparelhos a sessão continua até sair por lá.');
+    }
+  } catch {}
 })();

@@ -1,6 +1,6 @@
 // Service worker: deixa o app abrir rápido e instalável. Dados sempre vêm do Supabase (não são cacheados).
-const CACHE = 'financas-v25';
-const SHELL = ['./', './index.html', './styles.css', './app.js', './config.js', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './termos.html', './privacidade.html', './legal.css'];
+const CACHE = 'financas-v26';
+const SHELL = ['./', './index.html', './boot.js', './styles.css', './app.js', './config.js', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './termos.html', './privacidade.html', './legal.css'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -21,7 +21,7 @@ self.addEventListener('fetch', (e) => {
     // cache: 'no-cache' obriga a conferir com o servidor se há versão nova (ignora os 10 min de cache do GitHub Pages)
     fetch(e.request, { cache: 'no-cache' })
       .then((res) => {
-        if (res.ok) { // só guarda respostas boas (um erro 404/500 não pode virar a cópia offline)
+        if (res.ok && !url.search) { // só guarda respostas boas (um 404/500 não vira cópia offline) e sem ?parâmetros (cache não cresce sem fim)
           const copy = res.clone();
           e.waitUntil(caches.open(CACHE).then((c) => c.put(e.request, copy)));
         }
@@ -35,6 +35,7 @@ self.addEventListener('fetch', (e) => {
 self.addEventListener('push', (e) => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch { d = { body: e.data ? e.data.text() : '' }; }
+  if (!d || typeof d !== 'object') d = {}; // mensagem vazia ou 'null'
   e.waitUntil(self.registration.showNotification(d.title || 'Minhas Finanças', {
     body: d.body || '', tag: d.tag, renotify: !!d.tag, data: { url: d.url || './' },
   }));
@@ -43,7 +44,8 @@ self.addEventListener('push', (e) => {
 // Tocar na notificação abre o app (ou traz para a frente se já estiver aberto)
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
-  const url = new URL(e.notification.data?.url || './', self.registration.scope).href;
+  let url = new URL(e.notification.data?.url || './', self.registration.scope).href;
+  if (!url.startsWith(self.registration.scope)) url = self.registration.scope; // só abre páginas do próprio app
   e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
     const open = list.find((c) => c.url.startsWith(self.registration.scope));
     return open ? open.focus() : self.clients.openWindow(url);
