@@ -29,9 +29,15 @@
     profiles: [],      // perfis extras (família, empresa); o principal não tem linha (profile_id vazio)
     profileId: null,   // perfil ativo (null = principal)
     profilesOk: false, // a tabela de perfis existe no banco (se não, o app funciona como antes, sem perfis)
+    budgets: [],       // limite mensal por categoria (perfil ativo)
+    incomes: [],       // receitas (salário etc.)
+    goals: [],         // metas de economia
+    push: 'unknown',   // avisos neste celular: unknown | unsupported | denied | off | on
     tab: 'resumo',
     month: now.getFullYear() * 12 + now.getMonth(), // índice absoluto do mês
   };
+
+  let pushSynced = false; // este celular já foi ligado à conta atual nesta sessão (avisos)
 
   // ---------- Utilidades ----------
   const $ = (s, el = document) => el.querySelector(s);
@@ -44,6 +50,10 @@
   const parseDate = (s) => { const [y, m, d] = s.split('-').map(Number); return { y, m: m - 1, d }; };
   const fmtDate = (s) => { const { m, d } = parseDate(s); return `${pad2(d)}/${pad2(m + 1)}`; };
   const todayStr = () => { const t = new Date(); return `${t.getFullYear()}-${pad2(t.getMonth() + 1)}-${pad2(t.getDate())}`; };
+  const curIdx = () => { const t = new Date(); return t.getFullYear() * 12 + t.getMonth(); }; // mês de hoje
+  const dateStr = (idx, d) => `${Math.floor(idx / 12)}-${pad2((idx % 12) + 1)}-${pad2(Math.min(d, daysIn(idx)))}`;
+  const moneyInput = (v) => Number(v).toFixed(2).replace('.', ',');
+  const shortMonth = (idx) => `${MONTHS[idx % 12].slice(0, 3)} ${Math.floor(idx / 12)}`;
 
   function parseMoney(s) {
     s = String(s).trim().replace(/[R$\s]/g, '');
@@ -149,6 +159,35 @@
 
   const entriesForMonth = (idx) => state.expenses.map((e) => entryFor(e, idx)).filter(Boolean);
 
+  // ---------- Receitas ----------
+  // Única: entra no mês da data. Mensal: todo mês a partir da data (com ou sem fim); recur_changes = [{ from, amount }]
+  const incStart = (inc) => { const { y, m } = parseDate(inc.income_date); return y * 12 + m; };
+  function incAmountAt(inc, idx) {
+    const key = monthKey(idx);
+    let a = Number(inc.amount);
+    for (const c of inc.recur_changes || []) if (c.from <= key && 'amount' in c) a = Number(c.amount);
+    return a;
+  }
+  function incomeFor(inc, idx) {
+    const k = idx - incStart(inc);
+    if (k < 0) return null;
+    if (!inc.recurring) return k === 0 ? { inc, amount: Number(inc.amount), inst: 1, n: 1 } : null;
+    if (inc.recur_count && k >= inc.recur_count) return null;
+    return { inc, amount: incAmountAt(inc, idx), inst: k + 1, n: inc.recur_count || null };
+  }
+  const incomesForMonth = (idx) => state.incomes.map((i) => incomeFor(i, idx)).filter(Boolean);
+
+  // Receita mensal editada num mês depois do 1º: o valor novo vale daquele mês em diante (igual às contas fixas)
+  function incomeForward(inc, row, idx) {
+    if (!inc.recurring || !row.recurring || row.income_date !== inc.income_date) return { ...row, recur_changes: [] };
+    if (idx <= incStart(inc)) return { ...row, recur_changes: inc.recur_changes || [] };
+    const key = monthKey(idx);
+    const changes = (inc.recur_changes || []).filter((c) => c.from !== key);
+    if (row.amount !== incAmountAt({ ...inc, recur_changes: changes }, idx)) changes.push({ from: key, amount: row.amount });
+    changes.sort((a, b) => a.from.localeCompare(b.from));
+    return { ...row, amount: Number(inc.amount), recur_changes: changes };
+  }
+
   // Texto da parcela: "3/10", "3/60" (financiamento) ou "mensal" (sem fim)
   const instLabel = (e) => (e.exp.recurring && !e.n ? 'mensal' : e.n > 1 ? `${e.inst}/${e.n}` : '');
 
@@ -167,6 +206,10 @@
     }
   }
 
+  // Tabelas extras (limites, receitas, metas): se falhar, o app segue sem elas
+  const optional = (table, order = 'created_at') =>
+    scoped(sb.from(table).select('*')).order(order).then((r) => (r.error ? [] : r.data), () => []);
+
   // Cada carregamento ganha um número; a resposta é descartada se outro carregamento começou,
   // se um formulário foi aberto (para não sobrescrever o que for salvo nele) ou se saiu da conta.
   let loadSeq = 0;
@@ -175,10 +218,13 @@
     try {
       await loadProfiles();
       if (seq !== loadSeq) return;
-      const [c, expenses] = await Promise.all([scoped(sb.from('cards').select('*')).order('created_at'), fetchAllExpenses()]);
+      const [c, expenses, budgets, incomes, goals] = await Promise.all([
+        scoped(sb.from('cards').select('*')).order('created_at'), fetchAllExpenses(),
+        optional('budgets'), optional('incomes', 'income_date'), optional('goals'),
+      ]);
       if (c.error) throw c.error;
       if (seq !== loadSeq) return;
-      Object.assign(state, { cards: c.data, expenses, loadedAt: Date.now(), loadError: false });
+      Object.assign(state, { cards: c.data, expenses, budgets, incomes, goals, loadedAt: Date.now(), loadError: false });
     } catch (err) {
       if (seq !== loadSeq || state.loadedAt) return; // falhou só a atualização: mantém o que já está na tela
       state.loadError = true;
@@ -210,7 +256,7 @@
     state.profileId = id;
     try { id ? localStorage.setItem(profileKey(), id) : localStorage.removeItem(profileKey()); } catch {}
     loadSeq++; // descarta carregamento do perfil anterior
-    Object.assign(state, { cards: [], expenses: [], loadedAt: 0, loadError: false });
+    Object.assign(state, { cards: [], expenses: [], budgets: [], incomes: [], goals: [], loadedAt: 0, loadError: false });
     if (state.tab === 'resumo') render(); else setTab('resumo');
     loadData();
     toast(`Perfil: ${profileName(activeProfile())}`);
@@ -220,6 +266,7 @@
   // (ex.: gastos lançados em outro aparelho enquanto este ficou aberto)
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible' || !state.session || !$('#sheet').hidden) return;
+    refreshPush(); // a permissão pode ter mudado nas configurações do celular
     if (Date.now() - state.loadedAt > 5 * 60 * 1000) loadData();
   });
 
@@ -227,7 +274,7 @@
   let signUpMode = false;
 
   function showAuth() { $('#auth').hidden = false; $('#app').hidden = true; }
-  function showApp() { $('#auth').hidden = true; $('#app').hidden = false; render(); loadData(); loadAvatar(); }
+  function showApp() { $('#auth').hidden = true; $('#app').hidden = false; render(); loadData(); loadAvatar(); refreshPush(); }
 
   $('#auth-toggle').onclick = () => {
     signUpMode = !signUpMode;
@@ -277,7 +324,8 @@
     if (session && !had) showApp();
     if (!session) {
       loadSeq++; // descarta carregamentos em andamento
-      Object.assign(state, { cards: [], expenses: [], profiles: [], profileId: null, profilesOk: false, avatarUrl: null, loadedAt: 0, loadError: false });
+      pushSynced = false;
+      Object.assign(state, { cards: [], expenses: [], budgets: [], incomes: [], goals: [], profiles: [], profileId: null, profilesOk: false, avatarUrl: null, loadedAt: 0, loadError: false });
       if (state.tab !== 'resumo') setTab('resumo'); // próxima entrada começa no Resumo
       showAuth();
     }
@@ -378,43 +426,208 @@
 
   function renderResumo() {
     const list = entriesForMonth(state.month);
-    if (!list.length) return emptyState('Nenhum gasto neste mês', 'Toque em + para lançar o primeiro.');
-    const mine = round2(list.reduce((s, e) => s + e.mine, 0));
+    const incs = incomesForMonth(state.month);
+    const spent = round2(list.reduce((s, e) => s + e.mine, 0));
     const onCard = round2(list.filter((e) => e.card).reduce((s, e) => s + e.mine, 0));
+    const income = round2(incs.reduce((s, i) => s + i.amount, 0));
+    const left = round2(income - spent);
 
     const byCat = {};
     list.forEach((e) => { byCat[e.exp.category] = (byCat[e.exp.category] || 0) + e.mine; });
-    const cats = Object.entries(byCat).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+    const cats = Object.entries(byCat).map(([c, v]) => [c, round2(v)]).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
 
     const byPay = {};
     list.forEach((e) => { const k = e.card ? e.card.name : 'Pix / boleto / dinheiro'; byPay[k] = (byPay[k] || 0) + e.mine; });
 
     return `
+      ${state.month === curIdx() ? dueAlerts() : ''}
       <section class="card hero">
         <div class="label">Gastos do mês</div>
-        <div class="big num">${brl(mine)}</div>
+        <div class="big num">${brl(spent)}</div>
         <div class="hero-row">
           <div><small>No cartão</small><b class="num">${brl(onCard)}</b></div>
-          <div><small>Pix / boleto / dinheiro</small><b class="num">${brl(round2(mine - onCard))}</b></div>
+          <div><small>Pix / boleto / dinheiro</small><b class="num">${brl(round2(spent - onCard))}</b></div>
         </div>
+        ${income > 0 ? `
+        <div class="hero-row hero-bal">
+          <div><small>Receitas</small><b class="num">${brl(income)}</b></div>
+          <div class="${left < 0 ? 'neg' : ''}"><small>${left < 0 ? '⚠ Faltou' : 'Sobrou'}</small><b class="num">${brl(Math.abs(left))}</b></div>
+        </div>` : ''}
       </section>
-      <section class="card">
-        <h2>Categorias</h2>
-        ${donut(cats, mine)}
-        <div class="cat-list">
-          ${cats.map(([c, v]) => `
-            <div class="cat-row">
-              <div class="cat-top"><span><span class="muted">${pct(v, mine)}%</span> ${CAT_ICON[c] || '📦'} ${esc(c)}</span><b class="num">${brl(v)}</b></div>
-              <div class="cat-bar" style="--c:${catColor(c)}"><i style="width:${Math.max(2, (v / cats[0][1]) * 100)}%"></i></div>
-            </div>`).join('')}
-        </div>
-      </section>
+      ${categoriesCard(cats, spent)}
+      ${incomesCard(incs, income)}
+      ${goalsCard()}
+      ${list.length ? `
       <section class="card">
         <h2>Por forma de pagamento</h2>
         <ul class="list">
           ${Object.entries(byPay).sort((a, b) => b[1] - a[1]).map(([k, v]) => `
             <li class="item"><div class="grow title">${esc(k)}</div><div class="val num">${brl(v)}</div></li>`).join('')}
         </ul>
+      </section>` : ''}`;
+  }
+
+  // ---------- Limites por categoria ----------
+  const budgetOf = (cat) => { const b = state.budgets.find((x) => x.category === cat); return b ? Number(b.amount) : null; };
+
+  function categoriesCard(cats, spent) {
+    // Categorias com limite aparecem mesmo sem gasto no mês
+    const extra = state.budgets.filter((b) => !cats.some(([c]) => c === b.category))
+      .sort((a, b) => catIdx(a.category) - catIdx(b.category)).map((b) => [b.category, 0]);
+    const rows = [...cats, ...extra];
+    const max = cats.length ? cats[0][1] : 1;
+    const body = rows.length
+      ? `<div class="cat-list">${rows.map(([c, v]) => catRow(c, v, spent, max)).join('')}</div>`
+      : '<p class="muted card-note">Nenhum gasto neste mês. Toque em + para lançar o primeiro.</p>';
+    return `
+      <section class="card">
+        <div class="card-head"><h2>Categorias</h2><button class="btn small" id="budget-open">🎯 Limites</button></div>
+        ${donut(cats, spent)}
+        ${body}
+      </section>`;
+  }
+
+  function catRow(c, v, spent, max) {
+    const lim = budgetOf(c);
+    let bar, note = '';
+    if (lim) {
+      const r = v / lim;
+      const color = r > 1 ? 'var(--danger)' : r >= 0.8 ? 'var(--warn)' : catColor(c);
+      bar = `<div class="cat-bar" style="--c:${color}"><i style="width:${Math.min(100, Math.max(2, r * 100))}%"></i></div>`;
+      note = `<div class="cat-note${r > 1 ? ' over' : r >= 0.8 ? ' near' : ''}">${brl(v)} de ${brl(lim)} · ${r > 1 ? `passou ${brl(round2(v - lim))}` : `faltam ${brl(round2(lim - v))}`}</div>`;
+    } else {
+      bar = `<div class="cat-bar" style="--c:${catColor(c)}"><i style="width:${Math.max(2, (v / max) * 100)}%"></i></div>`;
+    }
+    return `
+      <button type="button" class="cat-row" data-budget-cat="${esc(c)}" aria-label="${esc(c)}: definir limite">
+        <div class="cat-top"><span><span class="muted">${pct(v, spent)}%</span> ${CAT_ICON[c] || '📦'} ${esc(c)}</span><b class="num">${brl(v)}</b></div>
+        ${bar}${note}
+      </button>`;
+  }
+
+  function openBudgetForm(focusCat) {
+    openSheet(`
+      <h3>Limites por categoria</h3>
+      <p class="muted sheet-note">Quanto você quer gastar por mês em cada categoria. Deixe em branco para não ter limite. Vale para todos os meses${state.profiles.length ? ` do perfil ${esc(profileName(activeProfile()))}` : ''}.</p>
+      <form id="budget-form" novalidate>
+        <div class="budget-grid">${CATEGORIES.map(([c, i]) => {
+          const lim = budgetOf(c);
+          return `<label class="budget-line"><span>${i} ${c}</span>
+            <input data-cat="${c}" inputmode="decimal" placeholder="Sem limite" value="${lim ? moneyInput(lim) : ''}"></label>`;
+        }).join('')}</div>
+        <p class="msg error" id="budget-msg"></p>
+        <div class="sheet-actions"><button class="btn primary" type="submit">Salvar limites</button></div>
+      </form>`);
+    const form = $('#budget-form');
+    const target = focusCat && form.querySelector(`[data-cat="${CSS.escape(focusCat)}"]`);
+    if (target) setTimeout(() => { target.focus(); target.scrollIntoView({ block: 'center' }); }, 60);
+
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const msg = $('#budget-msg');
+      const ops = [];
+      for (const input of form.querySelectorAll('[data-cat]')) {
+        const cat = input.dataset.cat, raw = input.value.trim();
+        const v = raw ? parseMoney(raw) : null;
+        if (raw && !(v > 0)) { msg.textContent = `Valor inválido em ${cat}.`; input.focus(); return; }
+        const cur = state.budgets.find((b) => b.category === cat);
+        if (!v && cur) ops.push(sb.from('budgets').delete().eq('id', cur.id));
+        else if (v && cur && Number(cur.amount) !== v) ops.push(sb.from('budgets').update({ amount: v }).eq('id', cur.id));
+        else if (v && !cur) ops.push(sb.from('budgets').insert(withProfile({ category: cat, amount: v })));
+      }
+      if (!ops.length) { closeSheet(); return; }
+      const btn = form.querySelector('[type=submit]');
+      btn.disabled = true;
+      const res = await Promise.all(ops);
+      state.budgets = await optional('budgets'); // relê do banco (mesmo se algo falhou, a tela mostra o que ficou salvo)
+      btn.disabled = false;
+      const err = res.find((r) => r.error);
+      if (err) { msg.textContent = 'Erro ao salvar: ' + err.error.message; return; }
+      closeSheet();
+      render();
+      toast('Limites salvos');
+    };
+  }
+
+  // ---------- Próximos vencimentos (dentro do app) ----------
+  function upcomingDues(days = 5) {
+    const t = new Date();
+    const out = [];
+    for (const card of state.cards) {
+      for (let off = 0; off <= days; off++) {
+        const d = new Date(t.getFullYear(), t.getMonth(), t.getDate() + off);
+        const idx = d.getFullYear() * 12 + d.getMonth();
+        if (Math.min(card.due_day, daysIn(idx)) !== d.getDate()) continue;
+        const inv = invoicesFor(idx).find((i) => i.card.id === card.id);
+        if (inv && inv.total > 0) out.push({ card, off, idx, total: inv.total });
+        break;
+      }
+    }
+    return out.sort((a, b) => a.off - b.off);
+  }
+
+  function dueAlerts() {
+    const dues = upcomingDues();
+    if (!dues.length) return '';
+    const when = (o) => (o === 0 ? 'vence hoje' : o === 1 ? 'vence amanhã' : `vence em ${o} dias`);
+    return `
+      <section class="card due-card">
+        <h2>Próximos vencimentos</h2>
+        <ul class="list">${dues.map((d) => `
+          <li class="item">
+            <span class="swatch" style="background:${esc(d.card.color)}"></span>
+            <div class="grow"><div class="title">${esc(d.card.name)}</div>
+              <div class="sub${d.off <= 1 ? ' urgent' : ''}">${when(d.off)} · ${dueDate(d.card, d.idx)}</div></div>
+            <div class="val num">${brl(d.total)}</div>
+          </li>`).join('')}
+        </ul>
+        ${state.push === 'off' ? '<button class="btn small" id="push-on-inline" style="margin-top:8px">🔔 Avisar no celular</button>' : ''}
+      </section>`;
+  }
+
+  // ---------- Receitas (cartão no Resumo) ----------
+  function incomesCard(incs, income) {
+    const rows = incs.map((i) => `
+      <li class="item tap" data-inc="${i.inc.id}">
+        <div class="dot inc-dot">💰</div>
+        <div class="grow"><div class="title">${esc(i.inc.description)}</div>
+          <div class="sub">${i.inc.recurring ? `🔁 ${i.n ? `${i.inst}/${i.n}` : 'mensal'} · dia ${parseDate(i.inc.income_date).d}` : fmtDate(i.inc.income_date)}</div></div>
+        <div class="val num pos">+ ${brl(i.amount)}</div>
+      </li>`).join('');
+    return `
+      <section class="card">
+        <div class="card-head"><h2>Receitas</h2><button class="btn small" id="income-add">+ Receita</button></div>
+        ${incs.length ? `<ul class="list">${rows}</ul>${incs.length > 1 ? `<div class="invoice-total"><span>Total</span><span class="num">${brl(income)}</span></div>` : ''}`
+          : '<p class="muted card-note">Lance seu salário e outras entradas para ver quanto sobra no mês.</p>'}
+      </section>`;
+  }
+
+  // ---------- Metas (cartão no Resumo) ----------
+  function goalInfo(g) {
+    const left = round2(Math.max(0, Number(g.target) - Number(g.saved)));
+    if (left <= 0) return '✅ Meta alcançada!';
+    if (!g.deadline) return `faltam ${brl(left)}`;
+    const { y, m } = parseDate(g.deadline);
+    const months = y * 12 + m - curIdx() + 1; // conta o mês atual
+    if (months <= 0) return `faltam ${brl(left)} · o prazo passou`;
+    return `faltam ${brl(left)} · ${brl(round2(left / months))}/mês até ${shortMonth(y * 12 + m)}`;
+  }
+
+  function goalsCard() {
+    const rows = state.goals.map((g) => {
+      const p = Number(g.target) > 0 ? Number(g.saved) / Number(g.target) : 0;
+      return `
+        <button type="button" class="cat-row" data-goal="${g.id}">
+          <div class="cat-top"><span>🎯 ${esc(g.name)}</span><b class="num">${Math.min(100, Math.round(p * 100))}%</b></div>
+          <div class="cat-bar" style="--c:${esc(g.color)}"><i style="width:${Math.min(100, Math.max(2, p * 100))}%"></i></div>
+          <div class="cat-note">${brl(Number(g.saved))} de ${brl(Number(g.target))} · ${goalInfo(g)}</div>
+        </button>`;
+    }).join('');
+    return `
+      <section class="card">
+        <div class="card-head"><h2>Metas</h2><button class="btn small" id="goal-add">+ Meta</button></div>
+        ${state.goals.length ? `<div class="cat-list">${rows}</div>`
+          : '<p class="muted card-note">Crie uma meta (viagem, reserva de emergência…) e acompanhe quanto já guardou e quanto falta por mês.</p>'}
       </section>`;
   }
 
@@ -477,9 +690,11 @@
 
   function renderGastos() {
     const groups = monthGroups(state.month);
-    if (!groups.length) return emptyState('Nenhum gasto neste mês', 'Compras no cartão aparecem no mês da fatura.');
+    const actions = `<div class="row-actions"><button class="btn small" id="check-invoice">🔍 Conferir fatura</button>${
+      groups.length ? '<button class="btn primary small" id="export">⬇ Exportar Excel</button>' : ''}</div>`;
+    if (!groups.length) return actions + emptyState('Nenhum gasto neste mês', 'Compras no cartão aparecem no mês da fatura.');
     const total = (v) => `<div class="invoice-total"><span>Total</span><span class="num">${brl(v)}</span></div>`;
-    let html = '<div class="row-actions"><button class="btn primary small" id="export">⬇ Exportar Excel</button></div>';
+    let html = actions;
     let cardsHead = false;
     for (const g of groups) {
       if (!g.card) {
@@ -591,6 +806,8 @@
           <p class="muted" style="font-size:12.5px;margin:10px 2px 0">Cada perfil tem os seus próprios cartões e gastos. Use para alguém da família ou para a sua empresa.</p>`
         : '<p class="muted" style="font-size:13.5px;margin:0">Perfis indisponíveis no momento.</p>'}
       </section>
+
+      ${pushCard()}
 
       <section class="card">
         <h2>Tema do app</h2>
@@ -830,8 +1047,27 @@
       el.onclick = () => openCardForm(state.cards.find((x) => x.id === el.dataset.card));
     });
     const ex = $('#export'); if (ex) ex.onclick = exportExcel;
+    const on = (sel, fn) => { const el = $(sel); if (el) el.onclick = fn; };
+    on('#check-invoice', openInvoiceCheck);
+    on('#budget-open', () => openBudgetForm());
+    on('#income-add', () => openIncomeForm());
+    on('#goal-add', () => openGoalForm());
+    on('#push-on', enablePush);
+    on('#push-on-inline', enablePush);
+    on('#push-off', disablePush);
+    on('#push-test', async () => {
+      const { data, error } = await sb.functions.invoke('due-reminders', { body: { action: 'test' } });
+      toast(error ? 'Erro ao enviar: ' + error.message : data?.sent ? 'Teste enviado. Confira as notificações.' : 'Nenhum celular inscrito. Desative e ative de novo.');
+    });
+    document.querySelectorAll('[data-budget-cat]').forEach((el) => { el.onclick = () => openBudgetForm(el.dataset.budgetCat); });
+    document.querySelectorAll('[data-inc]').forEach((el) => {
+      el.onclick = () => openIncomeForm(state.incomes.find((x) => x.id === el.dataset.inc));
+    });
+    document.querySelectorAll('[data-goal]').forEach((el) => {
+      el.onclick = () => openGoalForm(state.goals.find((x) => x.id === el.dataset.goal));
+    });
     const rt = $('#retry'); if (rt) rt.onclick = () => { state.loadError = false; render(); loadData(); };
-    const lo = $('#logout'); if (lo) lo.onclick = () => { if (confirm('Sair da conta?')) sb.auth.signOut(); };
+    const lo = $('#logout'); if (lo) lo.onclick = async () => { if (confirm('Sair da conta?')) { await unlinkPush(); sb.auth.signOut(); } };
     bindMenu();
   }
 
@@ -1044,6 +1280,629 @@
       render();
       toast('Gasto excluído');
     };
+  }
+
+  // ---------- Formulário de receita ----------
+  function openIncomeForm(inc) {
+    const i = inc || { description: '', income_date: todayStr(), recurring: true, recur_count: null };
+    const start0 = inc ? incStart(inc) : null;
+    const canEnd = inc && inc.recurring && state.month >= start0;
+    const fromIdx = inc && inc.recurring && state.month > start0 ? state.month : null; // valor novo vale a partir deste mês
+    const curAmount = inc ? (inc.recurring ? incAmountAt(inc, Math.max(state.month, start0)) : Number(inc.amount)) : null;
+    openSheet(`
+      <h3>${inc ? 'Editar receita' : 'Nova receita'}</h3>
+      <form id="inc-form" novalidate>
+        <div><label style="margin-bottom:6px">Tipo</label>${chipGroup('kind', [['recurring', '🔁 Todo mês'], ['single', 'Única']], i.recurring ? 'recurring' : 'single')}</div>
+        <label><span id="inc-amount-label">Valor</span>
+          <input class="amount-input num" name="amount" inputmode="decimal" placeholder="0,00" required value="${inc ? moneyInput(curAmount) : ''}"></label>
+        <label>Descrição<input name="description" maxlength="80" required placeholder="Ex.: Salário, Freela, Aluguel recebido" value="${esc(i.description)}"></label>
+        <div class="grid2">
+          <label><span id="inc-date-label">Data</span><input type="date" name="income_date" required value="${i.income_date}"></label>
+          <label id="inc-recur-wrap">Por quantos meses?
+            <input name="recur_count" type="number" min="1" max="600" inputmode="numeric" placeholder="Sem fim" value="${i.recur_count || ''}"></label>
+        </div>
+        <div class="preview" id="inc-preview"></div>
+        <p class="msg error" id="inc-msg"></p>
+        <div class="sheet-actions">
+          <button class="btn primary" type="submit">${inc ? 'Salvar alterações' : 'Adicionar receita'}</button>
+          ${canEnd ? `<button class="btn" type="button" id="inc-end">⏹ Encerrar após ${monthName(state.month)}</button>` : ''}
+          ${inc ? '<button class="btn danger" type="button" id="inc-del">Excluir receita</button>' : ''}
+        </div>
+      </form>`);
+    const form = $('#inc-form');
+    const readRow = () => {
+      const rec = chipVal(form, 'kind') === 'recurring';
+      const rc = parseInt(form.recur_count.value, 10);
+      return {
+        description: form.description.value.trim(),
+        amount: parseMoney(form.amount.value),
+        income_date: form.income_date.value,
+        recurring: rec,
+        recur_count: rec && rc > 0 ? Math.min(rc, 600) : null,
+      };
+    };
+    const isForward = (row) => fromIdx !== null && row.recurring && row.income_date === inc.income_date && row.amount !== incAmountAt(inc, fromIdx);
+    const update = () => {
+      const row = readRow();
+      $('#inc-recur-wrap').hidden = !row.recurring;
+      $('#inc-amount-label').textContent = row.recurring ? 'Valor por mês' : 'Valor';
+      $('#inc-date-label').textContent = row.recurring ? 'Primeiro mês (data)' : 'Data';
+      const pv = $('#inc-preview');
+      if (!(row.amount > 0)) { pv.textContent = 'Digite o valor para ver o resumo.'; return; }
+      if (!row.income_date) { pv.textContent = brl(row.amount); return; }
+      const st = incStart(row);
+      let txt = row.recurring ? `${brl(row.amount)} todo mês` : `${brl(row.amount)} em ${monthName(st)}`;
+      if (isForward(row)) txt += ` · vale a partir de ${monthName(fromIdx)} (os meses anteriores não mudam)`;
+      else if (row.recurring) txt += row.recur_count ? ` · de ${monthName(st)} até ${monthName(st + row.recur_count - 1)}` : ` · a partir de ${monthName(st)}, sem data para acabar`;
+      pv.textContent = txt;
+    };
+    bindChips(form, update);
+    form.addEventListener('input', update);
+    update();
+    if (!inc) setTimeout(() => form.amount.focus(), 50);
+
+    async function save(data) {
+      const res = inc
+        ? await sb.from('incomes').update(data).eq('id', inc.id).select().single()
+        : await sb.from('incomes').insert(withProfile(data)).select().single();
+      if (res.error) { $('#inc-msg').textContent = 'Erro ao salvar: ' + res.error.message; return false; }
+      if (inc) state.incomes = state.incomes.map((x) => (x.id === inc.id ? res.data : x));
+      else state.incomes.push(res.data);
+      closeSheet();
+      render();
+      return true;
+    }
+
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const row = readRow();
+      const msg = $('#inc-msg');
+      if (!(row.amount > 0)) { msg.textContent = 'Informe um valor válido.'; return; }
+      if (!row.description) { msg.textContent = 'Informe uma descrição.'; return; }
+      if (!row.income_date) { msg.textContent = 'Informe a data.'; return; }
+      const forward = inc && isForward(row);
+      const data = inc ? incomeForward(inc, row, Math.max(state.month, start0)) : { ...row, recur_changes: [] };
+      const btn = form.querySelector('[type=submit]');
+      btn.disabled = true;
+      const ok = await save(data);
+      btn.disabled = false;
+      if (ok) toast(forward ? `Alterado a partir de ${monthName(fromIdx)}` : inc ? 'Receita atualizada' : 'Receita adicionada');
+    };
+
+    const end = $('#inc-end');
+    if (end) end.onclick = async () => {
+      if (!confirm(`Encerrar "${inc.description}"? Ela aparece até ${monthName(state.month)} e some dos meses seguintes.`)) return;
+      if (await save({ recur_count: state.month - start0 + 1 })) toast('Receita encerrada');
+    };
+    const del = $('#inc-del');
+    if (del) del.onclick = async () => {
+      if (!confirm(`Excluir "${inc.description}"${inc.recurring ? ' de todos os meses (inclusive os anteriores)' : ''}?${inc.recurring ? '\n\nSe ela só acabou, use "Encerrar" para manter o histórico.' : ''}`)) return;
+      const { error } = await sb.from('incomes').delete().eq('id', inc.id);
+      if (error) { $('#inc-msg').textContent = 'Erro ao excluir: ' + error.message; return; }
+      state.incomes = state.incomes.filter((x) => x.id !== inc.id);
+      closeSheet();
+      render();
+      toast('Receita excluída');
+    };
+  }
+
+  // ---------- Formulário de meta ----------
+  function openGoalForm(goal) {
+    const g = goal || { name: '', target: '', saved: 0, deadline: null, color: COLORS[(state.goals.length + 3) % COLORS.length] };
+    let color = g.color;
+    openSheet(`
+      <h3>${goal ? esc(goal.name) : 'Nova meta'}</h3>
+      ${goal ? `
+      <div class="goal-move">
+        <div class="goal-move-top"><span class="muted">Guardado</span><b class="num">${brl(Number(goal.saved))} <span class="muted">de ${brl(Number(goal.target))}</span></b></div>
+        <div class="goal-move-row">
+          <input id="goal-move-val" inputmode="decimal" placeholder="Valor">
+          <button class="btn primary small" type="button" id="goal-in">+ Guardar</button>
+          <button class="btn small" type="button" id="goal-out">− Retirar</button>
+        </div>
+      </div>` : ''}
+      <form id="goal-form" novalidate>
+        <label>Nome<input name="name" maxlength="40" required placeholder="Ex.: Viagem, Reserva de emergência" value="${esc(g.name)}"></label>
+        <div class="grid2">
+          <label>Valor da meta<input name="target" inputmode="decimal" required placeholder="0,00" value="${g.target ? moneyInput(g.target) : ''}"></label>
+          ${goal ? '' : '<label>Já guardado<input name="saved" inputmode="decimal" placeholder="0,00"></label>'}
+          <label>Prazo (opcional)<input type="month" name="deadline" value="${g.deadline ? g.deadline.slice(0, 7) : ''}"></label>
+        </div>
+        <div><label style="margin-bottom:6px">Cor</label>
+          <div class="color-row">${COLORS.map((c) =>
+            `<button type="button" data-color="${c}" class="${c === color ? 'on' : ''}" style="background:${c}" aria-label="Cor ${c}"></button>`).join('')}</div></div>
+        <div class="preview" id="goal-preview"></div>
+        <p class="msg error" id="goal-msg"></p>
+        <div class="sheet-actions">
+          <button class="btn primary" type="submit">${goal ? 'Salvar alterações' : 'Criar meta'}</button>
+          ${goal ? '<button class="btn danger" type="button" id="goal-del">Apagar meta</button>' : ''}
+        </div>
+      </form>`);
+    const form = $('#goal-form');
+    form.querySelectorAll('[data-color]').forEach((b) => {
+      b.onclick = () => { color = b.dataset.color; form.querySelectorAll('[data-color]').forEach((x) => x.classList.toggle('on', x === b)); };
+    });
+    const readRow = () => ({
+      name: form.name.value.trim(),
+      target: parseMoney(form.target.value),
+      deadline: form.deadline.value ? `${form.deadline.value}-01` : null,
+      ...(goal ? {} : { saved: form.saved.value.trim() ? parseMoney(form.saved.value) : 0 }),
+    });
+    const update = () => {
+      const row = readRow();
+      const pv = $('#goal-preview');
+      if (!(row.target > 0)) { pv.textContent = 'Digite o valor da meta para ver quanto guardar por mês.'; return; }
+      pv.textContent = goalInfo({ ...row, saved: goal ? goal.saved : row.saved || 0 }).replace(/^faltam/, 'Faltam');
+    };
+    form.addEventListener('input', update);
+    update();
+    if (!goal) setTimeout(() => form.name.focus(), 50);
+
+    async function save(data, okMsg) {
+      const res = goal
+        ? await sb.from('goals').update(data).eq('id', goal.id).select().single()
+        : await sb.from('goals').insert(withProfile(data)).select().single();
+      if (res.error) { $('#goal-msg').textContent = 'Erro ao salvar: ' + res.error.message; return; }
+      if (goal) state.goals = state.goals.map((x) => (x.id === goal.id ? res.data : x));
+      else state.goals.push(res.data);
+      closeSheet();
+      render();
+      toast(okMsg);
+    }
+
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const row = readRow();
+      const msg = $('#goal-msg');
+      if (!row.name) { msg.textContent = 'Informe o nome da meta.'; return; }
+      if (!(row.target > 0)) { msg.textContent = 'Informe o valor da meta.'; return; }
+      if (!goal && !(row.saved >= 0)) { msg.textContent = 'Valor guardado inválido.'; return; }
+      const btn = form.querySelector('[type=submit]');
+      btn.disabled = true;
+      await save({ ...row, color }, goal ? 'Meta atualizada' : 'Meta criada');
+      btn.disabled = false;
+    };
+
+    // Guardar / retirar dinheiro da meta
+    const move = async (sign) => {
+      const v = parseMoney($('#goal-move-val').value);
+      if (!(v > 0)) { $('#goal-msg').textContent = 'Digite o valor para guardar ou retirar.'; $('#goal-move-val').focus(); return; }
+      const saved = round2(Number(goal.saved) + sign * v);
+      if (saved < 0) { $('#goal-msg').textContent = `Você só tem ${brl(Number(goal.saved))} guardado nessa meta.`; return; }
+      const reached = sign > 0 && saved >= Number(goal.target) && Number(goal.saved) < Number(goal.target);
+      await save({ saved }, reached ? '🎉 Meta alcançada!' : sign > 0 ? `Guardado ${brl(v)}` : `Retirado ${brl(v)}`);
+    };
+    if (goal) {
+      $('#goal-in').onclick = () => move(1);
+      $('#goal-out').onclick = () => move(-1);
+      $('#goal-del').onclick = async () => {
+        if (!confirm(`Apagar a meta "${goal.name}"?`)) return;
+        const { error } = await sb.from('goals').delete().eq('id', goal.id);
+        if (error) { $('#goal-msg').textContent = 'Erro ao apagar: ' + error.message; return; }
+        state.goals = state.goals.filter((x) => x.id !== goal.id);
+        closeSheet();
+        render();
+        toast('Meta apagada');
+      };
+    }
+  }
+
+  // ---------- Conferir fatura (PDF, CSV ou OFX do banco) ----------
+  // Tudo acontece no celular: o arquivo não é enviado para nenhum servidor.
+  const MON = { jan: 0, fev: 1, feb: 1, mar: 2, abr: 3, apr: 3, mai: 4, may: 4, jun: 5, jul: 6, ago: 7, aug: 7, set: 8, sep: 8, out: 9, oct: 9, nov: 10, dez: 11, dec: 11 };
+  const norm = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+
+  // "1.234,56" | "1234.56" | "-50,00" | "50,00-" | "(50,00)" → número
+  function parseAmount(raw) {
+    let s = String(raw).trim();
+    const neg = /^-|-$|^\(.*\)$|^-?\s*R\$\s*-/.test(s.replace(/\s/g, ''));
+    s = s.replace(/[^\d.,]/g, '');
+    if (/,\d{1,2}$/.test(s)) s = s.replace(/\./g, '').replace(',', '.');
+    else s = s.replace(/,/g, '');
+    const v = parseFloat(s);
+    return Number.isFinite(v) ? round2(neg ? -v : v) : NaN;
+  }
+
+  // Data sem ano: usa o ano que deixa a compra antes do vencimento da fatura
+  function resolveDate(d, m, y, idx) {
+    if (y == null) { y = Math.floor(idx / 12); if (y * 12 + m > idx) y--; }
+    else if (y < 100) y += 2000;
+    if (!(m >= 0 && m <= 11 && d >= 1 && d <= 31)) return null;
+    return dateStr(y * 12 + m, d);
+  }
+
+  function parseDateText(s, idx) {
+    let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+    if (m) return resolveDate(+m[3], +m[2] - 1, +m[1], idx);
+    m = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/.exec(s);
+    if (m) return resolveDate(+m[1], +m[2] - 1, m[3] ? +m[3] : null, idx);
+    m = /^(\d{1,2})[\s/.-]*([a-zç]{3})[a-zç]*\.?(?:[\s/.-]+(\d{4}))?/i.exec(norm(s));
+    if (m && m[2] in MON) return resolveDate(+m[1], MON[m[2]], m[3] ? +m[3] : null, idx);
+    return null;
+  }
+
+  // Parcela na descrição: "Parcela 3/10", "03/10", "3 de 10" → { k, n } e descrição sem o trecho
+  function splitInstallment(desc) {
+    const re = /\b(?:parc(?:ela)?\.?\s*)?(\d{1,2})\s*(?:\/|de)\s*(\d{1,2})\b/i;
+    const m = re.exec(desc);
+    if (m) {
+      const k = +m[1], n = +m[2];
+      if (n >= 2 && n <= 48 && k >= 1 && k <= n) return { k, n, desc: desc.replace(m[0], ' ').replace(/\s+/g, ' ').replace(/[\s\-–·]+$/, '').trim() };
+    }
+    return { k: 1, n: 1, desc };
+  }
+
+  const IGNORE_RE = /pagamento|pgto\b|^total|saldo|limite|minimo|vencimento|fechamento|fatura anterior|encargos do rotativo/;
+
+  function makeItem(date, desc, amount) {
+    desc = desc.replace(/R\$/g, '').replace(/[•*]{2,}\s*\d{4}/g, '').replace(/\s+/g, ' ').replace(/^[\s\-–·|]+|[\s\-–·|]+$/g, '').trim();
+    if (!date || !desc || !Number.isFinite(amount) || IGNORE_RE.test(norm(desc))) return null;
+    const inst = splitInstallment(desc);
+    return { date, desc: inst.desc || desc, amount, k: inst.k, n: inst.n };
+  }
+
+  // Linhas de texto do PDF → lançamentos ("12 NOV Mercado R$ 34,90", "12/11 UBER 27,50")
+  function itemsFromLines(lines, idx) {
+    const out = [];
+    const DATE_RE = /^(\d{1,2})(?:\/(\d{1,2})(?:\/(\d{2,4}))?|[\s.-]*(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-z]*\.?)(?=\s|$)/i;
+    const MONEY_RE = /-?\s*(?:R\$\s*)?-?\s*\d{1,3}(?:\.\d{3})*,\d{2}(?!\d)-?/g;
+    for (const raw of lines) {
+      const line = raw.trim();
+      const dm = DATE_RE.exec(norm(line));
+      if (!dm) continue;
+      const date = dm[2] ? resolveDate(+dm[1], +dm[2] - 1, dm[3] ? +dm[3] : null, idx) : resolveDate(+dm[1], MON[dm[4].slice(0, 3).toLowerCase()], null, idx);
+      const rest = line.slice(dm[0].length);
+      const monies = [...rest.matchAll(MONEY_RE)];
+      if (!monies.length) continue;
+      const last = monies[monies.length - 1];
+      let desc = rest.slice(0, last.index);
+      for (const mm of monies.slice(0, -1)) desc = desc.replace(mm[0], ' ');
+      const it = makeItem(date, desc, parseAmount(last[0]));
+      if (it) out.push(it);
+    }
+    return out;
+  }
+
+  function parseCSV(text, idx) {
+    const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter((l) => l.trim());
+    if (!lines.length) return [];
+    const first = lines[0];
+    const count = (ch) => first.split(ch).length - 1;
+    const sep = count(';') > count(',') ? ';' : count('\t') > count(',') ? '\t' : ',';
+    const cells = (line) => {
+      const out = []; let cur = '', q = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') { if (q && line[i + 1] === '"') { cur += '"'; i++; } else q = !q; }
+        else if (ch === sep && !q) { out.push(cur.trim()); cur = ''; }
+        else cur += ch;
+      }
+      out.push(cur.trim());
+      return out;
+    };
+    const rows = lines.map(cells);
+    const head = rows[0].map(norm);
+    const find = (re) => head.findIndex((h) => re.test(h));
+    let iDate = find(/^(data|date|dt)/), iDesc = find(/descri|title|titulo|lancamento|historico|estabelecimento|memo|nome/), iVal = find(/valor|amount|value|quantia|montante/);
+    const body = iDate >= 0 && iVal >= 0 ? rows.slice(1) : rows;
+    const out = [];
+    for (const r of body) {
+      let date, desc, amount;
+      if (iDate >= 0 && iVal >= 0) {
+        date = parseDateText(r[iDate] || '', idx);
+        amount = parseAmount(r[iVal] || '');
+        desc = iDesc >= 0 ? r[iDesc] || '' : r.filter((_, i) => i !== iDate && i !== iVal).sort((a, b) => b.length - a.length)[0] || '';
+      } else { // sem cabeçalho: adivinha pelas células
+        const di = r.findIndex((c) => parseDateText(c, idx));
+        const vi = r.map((c, i) => [c, i]).reverse().find(([c, i]) => i !== di && /\d[.,]\d{2}$/.test(c))?.[1] ?? -1;
+        if (di < 0 || vi < 0) continue;
+        date = parseDateText(r[di], idx); amount = parseAmount(r[vi]);
+        desc = r.filter((_, i) => i !== di && i !== vi).sort((a, b) => b.length - a.length)[0] || '';
+      }
+      const it = makeItem(date, desc, amount);
+      if (it) out.push(it);
+    }
+    return out;
+  }
+
+  function parseOFX(text, idx) {
+    return text.split(/<STMTTRN>/i).slice(1).map((t) => {
+      const dt = /<DTPOSTED>\s*(\d{4})(\d{2})(\d{2})/i.exec(t);
+      const amt = /<TRNAMT>\s*([-+\d.,]+)/i.exec(t);
+      const memo = /<MEMO>\s*([^<\r\n]+)/i.exec(t) || /<NAME>\s*([^<\r\n]+)/i.exec(t);
+      if (!dt || !amt) return null;
+      return makeItem(resolveDate(+dt[3], +dt[2] - 1, +dt[1], idx), memo ? memo[1] : 'Sem descrição', parseAmount(amt[1]));
+    }).filter(Boolean);
+  }
+
+  async function loadPdfJs() {
+    if (!window.pdfjsLib) await loadScript('https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js');
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+    return window.pdfjsLib;
+  }
+
+  // Texto do PDF agrupado em linhas (mesma altura na página), da esquerda para a direita
+  async function pdfLines(buf) {
+    const lib = await loadPdfJs();
+    let password;
+    for (;;) {
+      try {
+        const doc = await lib.getDocument({ data: buf.slice(0), password }).promise;
+        const lines = [];
+        for (let p = 1; p <= doc.numPages; p++) {
+          const { items } = await (await doc.getPage(p)).getTextContent();
+          const rows = [];
+          for (const it of items) {
+            if (!it.str.trim()) continue;
+            const y = it.transform[5], x = it.transform[4];
+            let row = rows.find((r) => Math.abs(r.y - y) < 3);
+            if (!row) rows.push((row = { y, parts: [] }));
+            row.parts.push({ x, s: it.str });
+          }
+          rows.sort((a, b) => b.y - a.y).forEach((r) => lines.push(r.parts.sort((a, b) => a.x - b.x).map((q) => q.s).join(' ')));
+        }
+        return lines;
+      } catch (err) {
+        if (err?.name !== 'PasswordException') throw err;
+        password = prompt(err.code === 2 ? 'Senha incorreta. Tente de novo:' : 'Esse PDF tem senha (muitos bancos usam os primeiros dígitos do CPF). Digite a senha:');
+        if (password == null) throw new Error('PDF com senha: conferência cancelada');
+      }
+    }
+  }
+
+  async function readStatement(file, idx) {
+    const name = file.name.toLowerCase();
+    let items;
+    if (name.endsWith('.pdf') || file.type === 'application/pdf') items = itemsFromLines(await pdfLines(await file.arrayBuffer()), idx);
+    else {
+      const text = await file.text();
+      items = /<STMTTRN>/i.test(text) ? parseOFX(text, idx) : parseCSV(text, idx);
+      // Alguns bancos exportam as compras com sinal negativo: se a maioria é negativa, inverte
+      if (items.filter((i) => i.amount < 0).length > items.filter((i) => i.amount > 0).length) items.forEach((i) => (i.amount = -i.amount));
+    }
+    const credits = items.filter((i) => !(i.amount > 0)).length; // estornos e créditos ficam de fora
+    return { items: items.filter((i) => i.amount > 0), credits };
+  }
+
+  // Categoria pelo histórico (mesma palavra em gasto anterior) ou por palavras conhecidas
+  function guessCategory(desc) {
+    const words = (s) => norm(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !/^\d+$/.test(w));
+    const mine = new Set(words(desc));
+    let best = null, score = 0;
+    for (const e of state.expenses) {
+      const sc = words(e.description).filter((w) => mine.has(w)).length;
+      if (sc > score) { score = sc; best = e.category; }
+    }
+    if (best) return best;
+    const d = norm(desc);
+    const rules = [
+      ['Transporte', /uber|99app|99 |posto|shell|ipiranga|combust|estacion|pedagio|sem parar|veloe/],
+      ['Alimentação', /ifood|restaur|lanch|burger|pizza|padaria|cafe|rappi|mcdonald|bk /],
+      ['Mercado', /mercad|supermerc|atacad|assai|carrefour|hortifruti|acougue/],
+      ['Saúde', /farm|drog|raia|pague menos|clinica|hospital|laborat/],
+      ['Assinaturas', /netflix|spotify|prime video|disney|youtube|hbo|max\.com|globoplay|apple\.com|google one|icloud/],
+      ['Compras', /amazon|shopee|mercadolivre|mercado livre|magalu|aliexpress|shein|americanas/],
+      ['Contas', /claro|vivo|tim |oi |enel|sabesp|copel|cemig|energia|internet/],
+    ];
+    return (rules.find(([, re]) => re.test(d)) || ['Outros'])[0];
+  }
+
+  // Data de compra que cai na fatura do mês idx (um dia antes do fechamento)
+  function dateForInvoice(card, idx) {
+    let c = card.due_day <= card.closing_day ? idx - 1 : idx; // mês do fechamento
+    if (card.closing_day > 1) return dateStr(c, card.closing_day - 1);
+    c -= 1;
+    return dateStr(c, daysIn(c));
+  }
+
+  // Compara a fatura do banco com o que está lançado no app (mesmo valor; desempata pelo nome e pela data)
+  function compareInvoice(stmt, card, idx) {
+    const app = entriesForMonth(idx).filter((e) => e.card && e.card.id === card.id);
+    const used = new Set();
+    const words = (s) => new Set(norm(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3));
+    const matched = [], missing = [];
+    for (const s of stmt) {
+      const sw = words(s.desc);
+      let best = -1, bestScore = -Infinity;
+      app.forEach((a, i) => {
+        if (used.has(i) || Math.abs(a.mine - s.amount) > 0.01) return;
+        const name = [...words(a.exp.description)].filter((w) => sw.has(w)).length;
+        const days = Math.abs(new Date(a.exp.purchase_date) - new Date(s.date)) / 864e5;
+        const sc = name * 100 - Math.min(days, 60);
+        if (sc > bestScore) { bestScore = sc; best = i; }
+      });
+      if (best >= 0) { used.add(best); matched.push({ s, a: app[best] }); } else missing.push(s);
+    }
+    return { matched, missing, extra: app.filter((_, i) => !used.has(i)) };
+  }
+
+  function rowFromStatement(s, card, idx) {
+    const start = idx - (s.k - 1); // parcela 3/10 → a 1ª caiu 2 meses antes
+    const date = s.date && invoiceMonth(s.date, card) === start ? s.date : dateForInvoice(card, start);
+    return {
+      description: s.desc.slice(0, 80), amount: s.n > 1 ? round2(s.amount * s.n) : s.amount,
+      category: guessCategory(s.desc), purchase_date: date, card_id: card.id,
+      installments: s.n, recurring: false, recur_count: null, split_divisor: 1, recur_changes: [],
+    };
+  }
+
+  function openInvoiceCheck() {
+    if (!state.cards.length) { toast('Cadastre o cartão primeiro (aba Cartões).'); return; }
+    const months = [state.month - 1, state.month, state.month + 1];
+    openSheet(`
+      <h3>Conferir fatura</h3>
+      <p class="muted sheet-note">Envie a fatura do banco em PDF, CSV ou OFX. O app compara com o que você lançou e mostra o que está faltando. O arquivo é lido só no seu celular.</p>
+      <form id="chk-form" novalidate>
+        <div><label style="margin-bottom:6px">Cartão</label>${chipGroup('card', state.cards.map((c) => [c.id, `▭ ${esc(c.name)}`]), state.cards[0].id)}</div>
+        <div><label style="margin-bottom:6px">Fatura que vence em</label>${chipGroup('month', months.map((m) => [m, shortMonth(m)]), state.month)}</div>
+        <label class="file-pick">
+          <input type="file" id="chk-file" accept=".pdf,.csv,.ofx,.txt,application/pdf,text/csv">
+          <span>📄 Escolher arquivo da fatura</span>
+        </label>
+      </form>
+      <div id="chk-result"></div>`);
+    const form = $('#chk-form');
+    let last = null; // { stmt, credits, card, idx, fileName }
+    const rerun = () => { if (last) { last.card = cardById(chipVal(form, 'card')); last.idx = Number(chipVal(form, 'month')); showResult(); } };
+    bindChips(form, rerun);
+
+    $('#chk-file').onchange = async (ev) => {
+      const file = ev.target.files[0];
+      if (!file) return;
+      const box = $('#chk-result');
+      box.innerHTML = '<p class="muted" style="text-align:center">Lendo a fatura…</p>';
+      const idx = Number(chipVal(form, 'month'));
+      try {
+        const { items, credits } = await readStatement(file, idx);
+        last = { stmt: items, credits, card: cardById(chipVal(form, 'card')), idx, fileName: file.name };
+        showResult();
+      } catch (err) {
+        box.innerHTML = `<p class="msg error">Não consegui ler o arquivo: ${esc(err.message)}</p>`;
+      }
+      ev.target.value = '';
+    };
+
+    function showResult() {
+      const box = $('#chk-result');
+      if (!box) return;
+      const { stmt, credits, card, idx, fileName } = last;
+      if (!stmt.length) {
+        box.innerHTML = `<p class="msg error">Não encontrei lançamentos em "${esc(fileName)}". Se for PDF, tente o CSV ou OFX que o app do banco exporta.</p>`;
+        return;
+      }
+      const { matched, missing, extra } = compareInvoice(stmt, card, idx);
+      const sum = (a) => round2(a.reduce((s, x) => s + x, 0));
+      const bank = sum(stmt.map((s) => s.amount)), app = sum([...matched.map((m) => m.a.mine), ...extra.map((e) => e.mine)]);
+      const diff = round2(bank - app);
+      const label = (s) => `${fmtDate(s.date)}${s.n > 1 ? ` · ${s.k}/${s.n}` : ''}`;
+      box.innerHTML = `
+        <div class="chk-sum">
+          <div><small>Fatura do banco</small><b class="num">${brl(bank)}</b><span class="muted">${stmt.length} itens</span></div>
+          <div><small>Lançado no app</small><b class="num">${brl(app)}</b><span class="muted">${matched.length + extra.length} itens</span></div>
+        </div>
+        <p class="chk-diff ${Math.abs(diff) < 0.01 ? 'ok' : 'bad'}">${Math.abs(diff) < 0.01 ? '✅ Tudo certo: os totais batem.' : `Diferença de ${brl(Math.abs(diff))} ${diff > 0 ? 'a mais no banco' : 'a mais no app'}`}</p>
+        ${missing.length ? `
+          <h4>Faltam no app (${missing.length})</h4>
+          <ul class="list chk-list">${missing.map((s, i) => `
+            <li class="item"><label class="chk-line"><input type="checkbox" data-miss="${i}" checked>
+              <span class="grow"><span class="title">${esc(s.desc)}</span><span class="sub">${label(s)} · ${CAT_ICON[guessCategory(s.desc)] || '📦'} ${esc(guessCategory(s.desc))}</span></span>
+              <b class="num">${brl(s.amount)}</b></label></li>`).join('')}
+          </ul>
+          <button class="btn primary" type="button" id="chk-add" style="width:100%;margin-top:8px">Adicionar os marcados ao app</button>` : ''}
+        ${extra.length ? `
+          <h4>No app, mas não na fatura (${extra.length})</h4>
+          <p class="muted sheet-note">Pode ser compra lançada no mês errado, valor diferente ou algo que ainda não entrou na fatura.</p>
+          <ul class="list">${extra.map(entryRow).join('')}</ul>` : ''}
+        ${matched.length ? `<p class="muted sheet-note">✔ ${matched.length} lançamento(s) conferido(s).</p>` : ''}
+        ${credits ? `<p class="muted sheet-note">${credits} crédito(s), estorno(s) ou pagamento(s) foram ignorados.</p>` : ''}`;
+      box.querySelectorAll('[data-exp]').forEach((el) => {
+        el.onclick = () => openExpenseForm(state.expenses.find((x) => x.id === el.dataset.exp));
+      });
+      const add = $('#chk-add');
+      if (add) add.onclick = async () => {
+        const pick = [...box.querySelectorAll('[data-miss]:checked')].map((c) => missing[Number(c.dataset.miss)]);
+        if (!pick.length) { toast('Marque pelo menos um lançamento'); return; }
+        add.disabled = true;
+        const { data, error } = await sb.from('expenses').insert(pick.map((s) => withProfile(rowFromStatement(s, card, idx)))).select();
+        add.disabled = false;
+        if (error) { toast('Erro ao adicionar: ' + error.message); return; }
+        state.expenses.unshift(...data);
+        render();
+        showResult();
+        toast(`${data.length} lançamento(s) adicionado(s)`);
+      };
+    }
+  }
+
+  // ---------- Avisos de vencimento (notificações) ----------
+  const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const swReady = () => Promise.race([navigator.serviceWorker.ready, new Promise((r) => setTimeout(() => r(null), 4000))]);
+  const b64ToBytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4)), (c) => c.charCodeAt(0));
+
+  async function saveSub(sub) {
+    const j = sub.toJSON();
+    const { error } = await sb.rpc('save_push_subscription', { p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth });
+    if (error) throw error;
+  }
+
+  // Descobre se este celular recebe avisos. Se já recebia, liga o celular à conta atual (automático).
+  async function refreshPush() {
+    let st;
+    try {
+      if (!pushSupported()) st = 'unsupported';
+      else if (Notification.permission === 'denied') st = 'denied';
+      else {
+        const reg = await swReady();
+        const sub = reg && (await reg.pushManager.getSubscription());
+        st = sub && Notification.permission === 'granted' ? 'on' : 'off';
+        if (st === 'on' && !pushSynced && state.session) { pushSynced = true; saveSub(sub).catch(() => { pushSynced = false; }); }
+      }
+    } catch { st = 'off'; }
+    if (st !== state.push) {
+      state.push = st;
+      if (['menu', 'resumo'].includes(state.tab) && $('#sheet').hidden && !$('#app').hidden) render();
+    }
+  }
+
+  async function enablePush() {
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { await refreshPush(); toast('Sem permissão para notificações'); return; }
+      const reg = await swReady();
+      if (!reg) throw new Error('o app ainda não terminou de instalar. Tente de novo em alguns segundos');
+      const { data, error } = await sb.functions.invoke('due-reminders', { body: { action: 'key' } });
+      if (error || !data?.publicKey) throw new Error(error?.message || 'servidor sem chave');
+      const old = await reg.pushManager.getSubscription();
+      if (old) await old.unsubscribe(); // chave antiga: inscreve de novo
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(data.publicKey) });
+      await saveSub(sub);
+      pushSynced = true;
+      state.push = 'on';
+      render();
+      toast('Avisos ativados');
+      sb.functions.invoke('due-reminders', { body: { action: 'test' } }).catch(() => {}); // notificação de teste
+    } catch (err) {
+      toast('Não foi possível ativar: ' + err.message);
+    }
+  }
+
+  // Desliga os avisos deste celular (toggle no Menu)
+  async function disablePush() {
+    try {
+      const reg = await swReady();
+      const sub = reg && (await reg.pushManager.getSubscription());
+      if (sub) {
+        await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+        await sub.unsubscribe();
+      }
+    } catch {}
+    state.push = 'off';
+    render();
+    toast('Avisos desativados neste celular');
+  }
+
+  // Ao sair da conta: este celular para de receber os avisos dela (a inscrição do navegador continua,
+  // e quem entrar depois passa a receber os avisos da própria conta)
+  async function unlinkPush() {
+    try {
+      if (!pushSupported()) return;
+      const reg = await swReady();
+      const sub = reg && (await reg.pushManager.getSubscription());
+      if (sub) await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+    } catch {}
+  }
+
+  function pushCard() {
+    const st = state.push;
+    let body;
+    if (st === 'unsupported') body = '<p class="muted card-note">Este navegador não aceita notificações. No Android, abra o app pelo Chrome e instale (menu ⋮ → Adicionar à tela inicial).</p>';
+    else if (st === 'denied') body = '<p class="muted card-note">As notificações estão bloqueadas para o app. Libere em Configurações do celular → Apps → Notificações e volte aqui.</p>';
+    else if (st === 'on') body = `<p class="card-note">✅ Ativados neste celular. Você recebe um aviso às 9h, 3 dias antes e no dia do vencimento de cada fatura.</p>
+      <div class="btn-row"><button class="btn small" id="push-test">Enviar teste</button><button class="btn small" id="push-off">Desativar</button></div>`;
+    else if (st === 'off') body = `<p class="muted card-note">Receba uma notificação 3 dias antes e no dia do vencimento de cada fatura, mesmo com o app fechado.</p>
+      <button class="btn primary small" id="push-on">🔔 Ativar avisos</button>`;
+    else body = '<p class="muted card-note">Verificando…</p>';
+    return `<section class="card"><h2>Avisos de vencimento</h2>${body}</section>`;
   }
 
   // ---------- Formulário de cartão ----------
